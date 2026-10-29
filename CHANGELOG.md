@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `git why --help` now shows the description and an *Examples* section (the
+  text passed to `typer.Typer(help=...)` is ignored for single-command apps),
+  and the usage line reads `git-why` instead of `main`.
+- CLI help tests no longer depend on the terminal: typer forces colour under
+  `GITHUB_ACTIONS` / `FORCE_COLOR` and styles the dashes of each option
+  separately, which made a substring assertion on raw output fail only in CI.
+  Tests now strip ANSI escapes, pin width/TERM, and check the *Options* panel
+  against the options the command actually declares.
+
 ### Changed
 
 - Merge commits listed by `git log -L` that merely combined both sides'

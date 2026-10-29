@@ -132,8 +132,8 @@ itself, which looks for a man page; use `git why -h` or `git-why --help`.)
 ```
 git why FILE:LINE                    one line
 git why FILE:START-END               a range (pickaxe cross-check for ranges ≤ 5 lines)
-git why FILE --function NAME         a whole function, tracked by git itself
-git why FILE --text 'exact line'     a line that no longer exists (file may be deleted too)
+git why FILE -f/--function NAME      a whole function, tracked by git itself
+git why FILE -t/--text 'exact line'  a line that no longer exists (file may be deleted too)
 
 Options
   -g, --github            fetch linked issues / PRs / review comments
@@ -150,7 +150,8 @@ Options
   -h, --help
 ```
 
-`--format auto` picks `rich` on a terminal and `plain` when piped.
+`--format auto` picks `rich` on a terminal and `plain` when piped. `git why -h`
+prints the same options with examples.
 
 ### Exit codes
 

@@ -17,12 +17,18 @@ from tests.conftest import git, write_commit
 runner = CliRunner()
 
 
-def run(*args: str, cwd: Path | None = None) -> tuple[int, str, str]:
+# Rich reads COLUMNS/TERM when it renders, so pin them: at very narrow widths
+# the help table word-breaks long option names ("--github-r" / "epo"), and
+# TERM=dumb disables colour even when a terminal is forced.
+HELP_ENV = {"COLUMNS": "100", "TERM": "xterm-256color", "NO_COLOR": None}
+
+
+def run(*args: str, cwd: Path | None = None, env: dict[str, str | None] | None = None) -> tuple[int, str, str]:
     old = os.getcwd()
     try:
         if cwd:
             os.chdir(cwd)
-        result = runner.invoke(app, list(args))
+        result = runner.invoke(app, list(args), env=env)
     finally:
         os.chdir(old)
     return result.exit_code, result.stdout, result.stderr
@@ -43,9 +49,85 @@ def test_version() -> None:
     assert code == 0 and out.strip() == f"git-why {__version__}"
 
 
-def test_help_mentions_examples() -> None:
-    code, out, _ = run("--help")
-    assert code == 0 and "--function" in out and "--github" in out and "--merges" in out
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def plain(text: str) -> str:
+    """Drop ANSI escapes and join wrapped lines so substrings can be asserted on."""
+    return " ".join(ANSI.sub("", text).split())
+
+
+def declared_options() -> set[str]:
+    """Every long option the command really declares, taken from Click itself."""
+    from typer.main import get_command
+
+    params = get_command(app).params
+    return {o for p in params if p.param_type_name == "option" for o in p.opts if o.startswith("--")}
+
+
+def options_panel_entries(help_output: str) -> set[str]:
+    """
+    Long options that head a row of the "Options" panel. Only the panel counts:
+    an option mentioned in an example or another option's description does not
+    document it.
+    """
+    lines = ANSI.sub("", help_output).splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith("╭─ Options")]
+    assert len(starts) == 1, "expected exactly one Options panel"
+    found: set[str] = set()
+    for line in lines[starts[0] + 1 :]:
+        if line.startswith("╰"):
+            break
+        cells = line.strip("│ ").split()
+        if cells and cells[0].startswith("--"):
+            found.add(cells[0])
+    return found
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_help_options_panel_lists_every_declared_option(flag: str) -> None:
+    code, out, _ = run(flag, env=HELP_ENV)
+    assert code == 0
+    declared = declared_options()
+    assert {"--function", "--text", "--github", "--github-repo", "--merges", "--json", "--format"} <= declared
+    listed = options_panel_entries(out)
+    assert declared <= listed, f"options missing from the Options panel: {sorted(declared - listed)}"
+
+
+def test_help_shows_description_and_examples() -> None:
+    code, out, _ = run("--help", env=HELP_ENV)
+    text = plain(out)
+    assert code == 0
+    assert "Usage: git-why [OPTIONS] TARGET" in text.replace("{TARGET}", "TARGET")
+    assert "why is this line here?" in text
+    assert "Examples" in text
+    for example in (
+        "git why src/app.py:42",
+        "git why src/app.py --function retry",
+        "git why src/app.py:42 --github",
+        "git why src/app.py:42 --merges",
+        "git why src/app.py --text 'TIMEOUT = 30'",
+    ):
+        assert example in text, example
+    assert "GITHUB_TOKEN" in text
+    assert "Exit codes: 0 ok, 1 usage error, 2 git error, 3 no history found" in text
+
+
+def test_help_with_forced_colour_still_documents_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Regression: typer forces a colour terminal when GITHUB_ACTIONS / FORCE_COLOR
+    is set (decided at import time), and the Rich help styles the two dashes of
+    an option separately, so the raw text no longer contains "--function".
+    The options must still be there once escapes are stripped.
+    """
+    import typer.rich_utils as ru
+
+    monkeypatch.setattr(ru, "FORCE_TERMINAL", True)
+    code, out, _ = run("--help", env=HELP_ENV)
+    assert code == 0
+    assert "\x1b[" in out, "expected styled output under a forced terminal"
+    assert {"--function", "--github", "--merges"} <= options_panel_entries(out)
+    assert "Examples" in plain(out)
 
 
 # ---------- formats ----------

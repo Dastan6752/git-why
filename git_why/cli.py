@@ -25,21 +25,33 @@ from .core import EXIT_GIT, EXIT_NO_HISTORY, EXIT_USAGE, Options, UserError, inv
 from .history import GitError
 from .render import render_json, render_plain, render_rich
 
+DESCRIPTION = (
+    "Answer [bold]why is this line here?[/bold] by reconstructing its decision history "
+    "from git — across renames, formatter runs and side branches that git blame cannot see."
+)
+
+# Shown after the options table. Each example is its own paragraph so Rich keeps
+# the lines apart; keep these in sync with README "Usage".
+EXAMPLES = (
+    "[bold]Examples[/bold]\n\n"
+    "  git why src/app.py:42                      one line\n\n"
+    "  git why src/app.py:40-55                   a range\n\n"
+    "  git why src/app.py --function retry        a whole function\n\n"
+    "  git why src/app.py:42 --github             with linked issues, PRs, reviews\n\n"
+    "  git why src/app.py:42 --merges             include edits made by merges\n\n"
+    "  git why src/app.py --text 'TIMEOUT = 30'   a line that no longer exists\n\n"
+    "  git why src/app.py:42 --json               machine-readable output\n\n"
+    "Set GITHUB_TOKEN (or GH_TOKEN) to raise the GitHub API rate limit and reach private repos. "
+    "Exit codes: 0 ok, 1 usage error, 2 git error, 3 no history found."
+)
+
+# A single-command app: the command's own help/epilog is what `--help` shows
+# (the Typer(help=...) text is only used for multi-command groups).
 app = typer.Typer(
     add_completion=False,
     pretty_exceptions_enable=False,
     rich_markup_mode="rich",
     context_settings={"help_option_names": ["-h", "--help"]},
-    help=(
-        "Answer [bold]why is this line here?[/bold] by reconstructing its decision history "
-        "from git — across renames, formatter runs and side branches that git blame cannot see.\n\n"
-        "Examples:\n\n"
-        "  git why src/app.py:42\n\n"
-        "  git why src/app.py:40-55 --merges\n\n"
-        "  git why src/app.py --function retry --github\n\n"
-        "  git why src/app.py --text 'TIMEOUT = 30' --format json\n\n"
-        "Set GITHUB_TOKEN (or GH_TOKEN) to raise the GitHub API rate limit and reach private repos."
-    ),
 )
 
 _TARGET = re.compile(r"^(?P<file>.+?):(?P<start>\d+)(?:-(?P<end>\d+))?$")
@@ -70,7 +82,7 @@ def _fail(message: str, code: int, hint: str | None = None) -> None:
     raise typer.Exit(code)
 
 
-@app.command()
+@app.command(name="git-why", help=DESCRIPTION, epilog=EXAMPLES)
 def main(
     target: str = typer.Argument(
         ..., help="FILE:LINE, FILE:START-END, or FILE (with --function / --text)", metavar="TARGET"
