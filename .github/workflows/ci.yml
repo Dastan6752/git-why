@@ -50,8 +50,20 @@ jobs:
           git why README.md:1 --format plain
           git why README.md:1 --json | python -c "import json,sys; d=json.load(sys.stdin); assert d['schema_version']==1 and not d['repo']['shallow']"
           # documented exit codes
-          git why README.md:999999; test $? -eq 1
-          git why no-such-file.py:1; test $? -eq 1
+          if git why README.md:999999 >/dev/null; then
+            echo "Expected out-of-range line to fail" >&2
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 1
+          fi
+          if git why no-such-file.py:1 >/dev/null; then
+            echo "Expected missing file to fail" >&2
+            exit 1
+          else
+            status=$?
+            test "$status" -eq 1
+          fi
 
   build:
     name: Build distribution
