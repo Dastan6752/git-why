@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "git-why"
+version = "0.1.0"
+description = "Answer 'why is this line here?' by reconstructing its decision history from git."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+]
+
+[project.scripts]
+# This makes a `git-why` command. Git automatically turns any `git-xyz`
+# executable on your PATH into a `git xyz` subcommand, so you also get `git why`.
+git-why = "git_why.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["git_why*"]
