@@ -24,8 +24,9 @@ from pathlib import Path
 # in commit messages. \x1f is the ASCII "unit separator".
 SEP = "\x1f"
 HEADER_PREFIX = "@@GITWHY@@"
-# Fields: hash, short hash, author, email, ISO date, unix timestamp, parents, subject, body
-FORMAT = f"{HEADER_PREFIX}{SEP}%H{SEP}%h{SEP}%an{SEP}%ae{SEP}%aI{SEP}%ct{SEP}%P{SEP}%s{SEP}%b"
+# Fields: hash, short hash, author, email, ISO author date, unix commit time,
+#         ISO commit date, parents, subject, body
+FORMAT = f"{HEADER_PREFIX}{SEP}%H{SEP}%h{SEP}%an{SEP}%ae{SEP}%aI{SEP}%ct{SEP}%cI{SEP}%P{SEP}%s{SEP}%b"
 
 GIT_TIMEOUT = 120  # seconds per git invocation; protects against pathological repos
 
@@ -54,11 +55,12 @@ class Step:
     short_sha: str
     author: str
     email: str
-    date: str  # ISO 8601, e.g. 2023-11-19T10:22:01+00:00
-    timestamp: int  # unix commit time, used for sorting
+    date: str  # ISO 8601 *author* date, e.g. 2023-11-19T10:22:01+00:00 (what git log shows)
+    timestamp: int  # unix *commit* time, used for sorting (matches the order the diffs apply in)
     subject: str  # first line of the commit message
     body: str  # the rest of the commit message
     parents: list[str] = field(default_factory=list)
+    committed: str = ""  # ISO 8601 commit date; differs from ``date`` after rebase / cherry-pick / am
     file_before: str | None = None  # path before this commit (None if created)
     file_after: str | None = None  # path after this commit (None if deleted)
     hunks: list[Hunk] = field(default_factory=list)
@@ -118,6 +120,12 @@ class Step:
     @property
     def day(self) -> str:
         return self.date[:10]
+
+    @property
+    def committed_day(self) -> str:
+        """Commit day when it differs from the author day, else ``""`` (nothing worth showing)."""
+        cday = self.committed[:10]
+        return cday if cday and cday != self.day else ""
 
     def focus(self, removed: list[str], added: list[str]) -> None:
         """Replace all hunks with a single hunk containing only the lines we care about."""
@@ -436,8 +444,19 @@ def parse_log(text: str) -> list[Step]:
     for raw in text.splitlines():
         if raw.startswith(HEADER_PREFIX):
             parts = raw.split(SEP)
-            _, sha, short, author, email, date, ts, parents, subject, body = (parts + [""] * 10)[:10]
-            current = Step(sha, short, author, email, date, int(ts or 0), subject, body, parents=parents.split())
+            _, sha, short, author, email, date, ts, committed, parents, subject, body = (parts + [""] * 11)[:11]
+            current = Step(
+                sha,
+                short,
+                author,
+                email,
+                date,
+                int(ts or 0),
+                subject,
+                body,
+                parents=parents.split(),
+                committed=committed,
+            )
             steps.append(current)
             hunk = None
             in_body = True

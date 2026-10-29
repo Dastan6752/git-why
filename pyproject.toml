@@ -35,17 +35,17 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
-    "ruff>=0.6",
+    "ruff>=0.13",  # RUF059 (used in per-file-ignores) is stable since 0.13
     "mypy>=1.10",
     "build>=1.2",
     "twine>=5",
 ]
 
 [project.urls]
-Homepage = "https://github.com/git-why/git-why"
-Documentation = "https://github.com/git-why/git-why#readme"
-Changelog = "https://github.com/git-why/git-why/blob/main/CHANGELOG.md"
-Issues = "https://github.com/git-why/git-why/issues"
+Homepage = "https://github.com/Dastan6752/git-why"
+Documentation = "https://github.com/Dastan6752/git-why#readme"
+Changelog = "https://github.com/Dastan6752/git-why/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Dastan6752/git-why/issues"
 
 [project.scripts]
 # This makes a `git-why` command. Git turns any `git-<name>` executable on

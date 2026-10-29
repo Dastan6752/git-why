@@ -94,6 +94,7 @@ def test_parse_git_output():
             "d@x",
             "2024-01-01T00:00:00+00:00",
             "1704067200",
+            "2024-01-02T00:00:00+00:00",  # committed a day later (e.g. rebased)
             "p1",
             "add thing",
             "Fixes #1",
@@ -116,6 +117,7 @@ def test_parse_git_output():
     (step,) = parse_log(text)
     assert step.short_sha == "fffffff"
     assert step.timestamp == 1704067200
+    assert step.day == "2024-01-01" and step.committed_day == "2024-01-02"
     assert step.file_before == "old.py" and step.file_after == "new.py"
     assert step.removed == ["old"] and step.added == ["new"]
     assert "second body line" in step.body
@@ -124,7 +126,7 @@ def test_parse_git_output():
 
 def test_parse_multiple_hunks():
     header = SEP.join(
-        [HEADER_PREFIX, "f" * 40, "fffffff", "a", "a@x", "2024-01-01T00:00:00+00:00", "1", "p1 p2", "s", ""]
+        [HEADER_PREFIX, "f" * 40, "fffffff", "a", "a@x", "2024-01-01T00:00:00+00:00", "1", "", "p1 p2", "s", ""]
     )
     text = "\n".join(
         [

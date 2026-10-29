@@ -244,6 +244,7 @@ def test_pickaxe_search_unions_follow_and_full_history(monkeypatch: pytest.Monke
                 "a@x",
                 "2017-05-25T00:00:00+00:00",
                 str(ts),
+                "2017-05-25T00:00:00+00:00",
                 "p",
                 subject,
                 "",

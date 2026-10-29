@@ -88,3 +88,39 @@ def test_merge_scan_uses_historical_paths(make_repo) -> None:  # type: ignore[no
 
     report = investigate(repo / "new.py", 3, 3, Options(merges=True))
     assert any(s.found_by == "merge" and s.is_deletion for s in report.steps)
+
+
+def test_pass_through_merge_is_not_reported_as_an_edit(make_repo) -> None:  # type: ignore[no-untyped-def]
+    """
+    main:  A ── C(edits line 8) ── M(clean merge)
+            \\── B(edits line 1) ──┘
+    `git log -L 1,8` lists M because the range differs from both parents, but M
+    made no edit of its own; it must be dimmed, not shown as "changed by the
+    merge itself".
+    """
+    import io
+
+    from git_why.merges import PASSTHROUGH_MERGE_NOTE
+    from git_why.render import render_plain
+
+    from tests.conftest import git, write_commit
+
+    repo = make_repo("pass-through")
+    body = "".join(f"line {i}\n" for i in range(2, 8))
+    write_commit(repo, "f.py", f"first = 1\n{body}last = 1\n", "A: base")
+    git(repo, "checkout", "-q", "-b", "side")
+    write_commit(repo, "f.py", f"first = 2\n{body}last = 1\n", "B: first on side")
+    git(repo, "checkout", "-q", "main")
+    write_commit(repo, "f.py", f"first = 1\n{body}last = 2\n", "C: last on main")
+    git(repo, "merge", "-q", "--no-ff", "-m", "M: merge side", "side")
+
+    report = investigate(repo / "f.py", 1, 8, Options())
+    merge = next(s for s in report.steps if s.subject.startswith("M:"))
+    assert merge.is_merge and merge.is_noise and merge.noise_reason == PASSTHROUGH_MERGE_NOTE
+    assert [s.subject[:1] for s in report.meaningful] == ["C", "B", "A"]
+    assert "1 pass-through merge ignored" in report.summary()
+
+    buf = io.StringIO()
+    render_plain(report, out=buf)
+    assert "changed by the merge itself" not in buf.getvalue()
+    assert "[merge combined both sides without edits of its own, skipped]" in buf.getvalue()

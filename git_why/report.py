@@ -158,7 +158,8 @@ class Report:
             return "No meaningful history found."
         origin = real[-1]
         changes = real[:-1]
-        noise = len(self.steps) - len(real)
+        plain_merges = sum(1 for s in self.steps if s.is_noise and s.is_merge)
+        noise = len(self.steps) - len(real) - plain_merges
         hidden = self.hidden_count
         merge_edits = sum(1 for s in self.steps if s.found_by == "merge")
 
@@ -176,6 +177,8 @@ class Report:
             )
         if noise:
             parts.append(f"{noise} formatting/move commit{'s' if noise != 1 else ''} ignored")
+        if plain_merges:
+            parts.append(f"{plain_merges} pass-through merge{'s' if plain_merges != 1 else ''} ignored")
         if merge_edits:
             parts.append(f"{merge_edits} change{'s' if merge_edits != 1 else ''} made inside merge commits")
         if hidden:
@@ -225,6 +228,7 @@ class Report:
             "short_sha": step.short_sha,
             "url": self.commit_url(step.sha),
             "date": step.date,
+            "committed": step.committed or None,
             "author": step.author,
             "author_email": step.email,
             "subject": step.subject,

@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Merge commits listed by `git log -L` that merely combined both sides'
+  changes (no edits of their own under `--remerge-diff`) are now dimmed as
+  *pass-through merges* instead of being reported as "changed by the merge
+  itself"; the summary counts them separately.
+- Commit headers show `(committed YYYY-MM-DD)` when the commit date differs
+  from the author date (rebase, cherry-pick), since the timeline is ordered by
+  commit time. JSON steps gain a `committed` field (schema version unchanged).
+- CI checks out full history for the self-smoke test and no longer calls
+  `git why --help` (git intercepts `--help` and looks for a man page); it also
+  asserts the documented exit codes.
+- Project URLs now point to `https://github.com/Dastan6752/git-why`.
+
 ## [0.1.0] - 2026-10-29
 
 First public release.
@@ -46,5 +60,5 @@ First public release.
   CI on Linux/macOS for Python 3.10–3.13 with ruff, mypy, build and twine
   checks, and a Trusted-Publishing release workflow with a manual approval gate.
 
-[Unreleased]: https://github.com/git-why/git-why/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/git-why/git-why/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Dastan6752/git-why/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Dastan6752/git-why/releases/tag/v0.1.0

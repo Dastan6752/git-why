@@ -8,7 +8,7 @@ environment, what we expect from changes, and how releases work.
 Requirements: Python 3.10+ and git 2.30+ (2.36+ to exercise `--merges` fully).
 
 ```bash
-git clone https://github.com/git-why/git-why
+git clone https://github.com/Dastan6752/git-why
 cd git-why
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"

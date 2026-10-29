@@ -48,7 +48,7 @@ $ git why src/requests/adapters.py:81 --github
   │   line created here in requests/adapters.py
   │   + DEFAULT_RETRIES = 0
   evidence: weak  https://github.com/psf/requests/commit/88d41430186b98166e20f7b6d8f100c72fcd07b3
-  ● 2014-09-10  2bc7762c  "Update how we handle retries to be consistent with documentation"  (Ian Cordasco)  ⚡ invisible to git blame
+  ● 2014-09-10 (committed 2014-11-12)  2bc7762c  "Update how we handle retries to be consistent with documentation"  (Ian Cordasco)  ⚡ invisible to git blame
   │   - DEFAULT_RETRIES = 0
   │   + DEFAULT_RETRIES = object()
   │   landed via merge 90857b8b "Merge pull request #2216 from sigmavirus24/retries-take-2" on 2014-12-01
@@ -61,7 +61,7 @@ $ git why src/requests/adapters.py:81 --github
   │     @sigmavirus24 (comment): I realize that using `0` will make it a magic number in this case. Perhaps on the sentinel object we set a `value`, e.g.,
   │     @sigmavirus24 (comment): > If you do self.max_retries = Retry.from_int(max_retries) doesn't this mean that you can only pass an integer number of retries?
   evidence: strong  https://github.com/psf/requests/commit/2bc7762cb6c91f49e5b116d3eb9f93af01e331f2
-  ● 2014-10-24  2eb7e3c8  "Add last few changes and add a quick test"  (Ian Cordasco)  ⚡ invisible to git blame
+  ● 2014-10-24 (committed 2014-11-12)  2eb7e3c8  "Add last few changes and add a quick test"  (Ian Cordasco)  ⚡ invisible to git blame
   │   - DEFAULT_RETRIES = object()
   │   + DEFAULT_RETRIES = 0
   │   landed via merge 90857b8b "Merge pull request #2216 from sigmavirus24/retries-take-2" on 2014-12-01
@@ -106,6 +106,8 @@ $ git why src/requests/__version__.py:5
 
   Summary (inferred): Introduced on 2017-05-25 by Kenneth Reitz ("__version__.py"); changed meaningfully 2 times since, most recently on 2017-05-25 by Kenneth Reitz; 1 formatting/move commit ignored; 2 commits recovered that git blame / git log -L cannot see.
   Confidence: high
+    - edits made inside merge commits were not inspected (use --merges)
+    - includes commits that git blame / git log -L cannot see (recovered via pickaxe)
 ```
 
 ## Installation
@@ -176,7 +178,7 @@ Options
     {
       "sha": "2bc7762cb6c91f49e5b116d3eb9f93af01e331f2", "short_sha": "2bc7762c",
       "url": "https://github.com/psf/requests/commit/2bc7762cb6c91f49e5b116d3eb9f93af01e331f2",
-      "date": "2014-09-10T11:57:20-05:00", "author": "Ian Cordasco", "author_email": "...",
+      "date": "2014-09-10T11:57:20-05:00", "committed": "2014-11-12T13:56:28-06:00", "author": "Ian Cordasco", "author_email": "...",
       "subject": "Update how we handle retries to be consistent with documentation", "body": "",
       "kind": "change", "found_by": "pickaxe", "is_merge": false, "noise_reason": null, "shallow_boundary": false,
       "file_before": "requests/adapters.py", "file_after": "requests/adapters.py",
@@ -241,13 +243,18 @@ resolve target ─► git log -L ─► pickaxe walk ─► merges ─► noise 
    search (`}`, `pass`) and at points where the same text occurs twice in the
    file (ambiguous).
 3. **Merging strategies.** Both timelines are united by commit and ordered by
-   time (ties broken topologically). The set of texts learned by the walk — the
-   *lineage* — trims `git log -L`'s *range drift*: after a commit replaces N
-   lines with M, `-L` widens the tracked range and reports changes to
-   neighbouring lines.
+   *commit* time (ties broken topologically), which is the order the diffs
+   apply in. The date shown is the author date, as in `git log`; when a commit
+   was rebased or cherry-picked later, the header also shows
+   `(committed YYYY-MM-DD)` so the order never looks wrong. The set of texts
+   learned by the walk — the *lineage* — trims `git log -L`'s *range drift*:
+   after a commit replaces N lines with M, `-L` widens the tracked range and
+   reports changes to neighbouring lines.
 4. **Merges.** Every side-branch commit is annotated with the merge that landed
    it on the mainline (which is where `Merge pull request #N` lives). Merge
-   commits that `-L` lists get their real edits via `git --remerge-diff`. With
+   commits that `-L` lists get their real edits via `git --remerge-diff`; a
+   merge that only combined both sides' changes is dimmed as a *pass-through
+   merge*, never shown as an edit. With
    `--merges`, every merge the file was part of is diffed the same way and
    edits to our line that no ordinary commit explains are reported as
    `changed by the merge itself`.

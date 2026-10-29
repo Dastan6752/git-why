@@ -33,6 +33,8 @@ jobs:
         python: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the smoke test below reads this repository's real history
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -42,10 +44,14 @@ jobs:
       - name: Smoke test the installed command
         run: |
           git-why --version
-          git why --help > /dev/null
+          git-why --help > /dev/null      # (`git why --help` is intercepted by git itself and looks for a man page)
+          git why -h > /dev/null
           # the repository's own history is a real fixture
           git why README.md:1 --format plain
-          git why README.md:1 --json | python -c "import json,sys; d=json.load(sys.stdin); assert d['schema_version']==1"
+          git why README.md:1 --json | python -c "import json,sys; d=json.load(sys.stdin); assert d['schema_version']==1 and not d['repo']['shallow']"
+          # documented exit codes
+          git why README.md:999999; test $? -eq 1
+          git why no-such-file.py:1; test $? -eq 1
 
   build:
     name: Build distribution

@@ -107,6 +107,7 @@ def sample_report(tmp_path: Path) -> Report:
     fmt.is_noise, fmt.noise_reason = True, "whitespace / formatting only"
     change = mk("c", 3, "tune (#99)", removed=["sleep(1.0)"], added=["sleep(0.3)"], body="p99 regressed")
     change.found_by = "pickaxe"
+    change.committed = "2024-03-15T12:00:00+00:00"  # rebased: commit day differs from author day
     change.landed_via = mk("d", 4, "Merge pull request #99 from x/y")
     merge = mk(
         "e", 5, "resolve conflict", removed=["sleep(0.3)", "sleep(0.5)"], added=["sleep(0.4)"], parents=["1", "2"]
@@ -184,8 +185,10 @@ def test_render_plain_covers_all_step_kinds(tmp_path: Path) -> None:
         "issue #42: Double charge",
         "-> PR #99",
         "warning: GitHub API rate limit reached",
+        "* 2024-01-01 (committed 2024-03-15) ccccccc",
     ):
         assert needle in out, needle
+    assert out.count("(committed") == 1  # only shown when it differs from the author date
 
 
 def test_render_json_roundtrip(tmp_path: Path) -> None:
@@ -196,6 +199,8 @@ def test_render_json_roundtrip(tmp_path: Path) -> None:
     assert kinds == ["origin", "noise", "change", "change", "deletion", "origin"]
     assert data["steps"][2]["github_threads"][0]["number"] == 99
     assert data["steps"][3]["is_merge"] is True
+    assert data["steps"][2]["committed"] == "2024-03-15T12:00:00+00:00"
+    assert data["steps"][0]["committed"] is None
     assert data["github"]["warnings"] == ["GitHub API rate limit reached"]
 
 

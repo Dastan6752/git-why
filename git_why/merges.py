@@ -67,19 +67,33 @@ def historical_paths(file: str, steps: list[Step]) -> list[str]:
     return paths
 
 
+PASSTHROUGH_MERGE_NOTE = "merge combined both sides without edits of its own"
+UNKNOWN_MERGE_NOTE = "merge; its own edits could not be determined"
+
+
 def fill_merge_hunks(repo: Path, file: str, steps: list[Step], lineage: set[str]) -> None:
-    """Give hunk-less merge steps (as produced by ``git log -L``) their real edits."""
+    """
+    Give hunk-less merge steps (as produced by ``git log -L``) their real edits.
+
+    ``git log -L`` lists a merge whenever the tracked range differs from *both*
+    parents — which is also true for a clean merge that merely combined two
+    sides' changes. Such a merge changed nothing itself, so it is marked as
+    noise rather than shown as "changed by the merge itself".
+    """
     paths = historical_paths(file, steps)
     for step in steps:
         if not step.is_merge or step.hunks:
             continue
         diff = merge_commit_diff(repo, step.sha, paths)
         if diff is None:
+            step.is_noise, step.noise_reason = True, UNKNOWN_MERGE_NOTE
             continue
         removed, added = _relevant(diff, lineage)
         if removed or added:
             step.focus(removed, added)
             step.file_before, step.file_after = diff.file_before, diff.file_after
+        else:
+            step.is_noise, step.noise_reason = True, PASSTHROUGH_MERGE_NOTE
 
 
 def scan_merge_resolutions(repo: Path, file: str, lineage: set[str], existing: list[Step]) -> list[Step]:

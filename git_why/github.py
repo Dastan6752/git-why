@@ -29,7 +29,7 @@ from typing import Any
 from . import __version__
 
 DEFAULT_API = "https://api.github.com"
-USER_AGENT = f"git-why/{__version__} (+https://github.com/git-why/git-why)"
+USER_AGENT = f"git-why/{__version__} (+https://github.com/Dastan6752/git-why)"
 MAX_EXCERPT = 400
 
 # transport(url, headers, timeout) -> (status, headers, body)

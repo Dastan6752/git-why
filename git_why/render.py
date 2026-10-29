@@ -105,8 +105,9 @@ def _rich_step(report: Report, step: Step, p, *, reborn: bool, max_body: int, sh
         return
 
     colour = {"origin": "green", "deletion": "red"}.get(step.kind, "yellow")
+    committed = f" [dim](committed {step.committed_day})[/dim]" if step.committed_day else ""
     p(
-        f"  [bold {colour}]{KIND_BULLET[step.kind]}[/bold {colour}] [bold]{step.day}[/bold]  "
+        f"  [bold {colour}]{KIND_BULLET[step.kind]}[/bold {colour}] [bold]{step.day}[/bold]{committed}  "
         f'[magenta]{step.short_sha}[/magenta]  "{escape(step.subject.strip())}"  '
         f"[dim]({escape(step.author)})[/dim]{tag_md}"
     )
@@ -196,8 +197,9 @@ def render_plain(report: Report, *, max_body: int = 6, out: IO[str] | None = Non
             continue
         marker = {"origin": "*", "deletion": "x"}.get(step.kind, "*")
         tag = _tag(report, step)
+        committed = f" (committed {step.committed_day})" if step.committed_day else ""
         w(
-            f'{marker} {step.day} {step.short_sha} "{step.subject.strip()}" ({step.author})'
+            f'{marker} {step.day}{committed} {step.short_sha} "{step.subject.strip()}" ({step.author})'
             + (f"  [{tag}]" if tag else "")
             + "\n"
         )
