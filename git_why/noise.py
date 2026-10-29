@@ -32,8 +32,12 @@ def _squash(lines: list[str]) -> str:
 def classify(step: Step) -> Step:
     """Fill in step.is_noise / step.noise_reason and return the step."""
 
+    # 0. pickaxe.py may already have decided (e.g. "moved within file").
+    if step.is_noise:
+        return step
+
     # 1. Line was created here — that's never noise, it's the origin story.
-    if step.file_before is None:
+    if step.is_origin:
         step.is_noise = False
         return step
 

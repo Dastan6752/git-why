@@ -5,6 +5,7 @@ Usage:
     git why src/payments/retry.py:42        # one line
     git why src/payments/retry.py:40-45     # a range
     git why src/payments/retry.py:42 --all  # also show noise commits in full
+    git why src/payments/retry.py:42 --no-pickaxe   # fast mode (git log -L only)
 """
 
 from __future__ import annotations
@@ -15,7 +16,10 @@ from pathlib import Path
 import typer
 
 from . import history, noise
+from .pickaxe import PickaxeWalker, merge_timelines
 from .render import render
+
+MAX_PICKAXE_LINES = 5
 
 app = typer.Typer(add_completion=False, help="Answer: why is this line here?")
 
@@ -42,6 +46,8 @@ def find_repo_root(path: Path) -> Path:
 def main(
     target: str = typer.Argument(..., help="FILE:LINE or FILE:START-END"),
     show_noise: bool = typer.Option(False, "--all", "-a", help="Treat every commit as meaningful"),
+    no_pickaxe: bool = typer.Option(False, "--no-pickaxe", help="Only use git log -L (faster, may miss side-branch changes)"),
+    debug: bool = typer.Option(False, "--debug", help="Print search statistics to stderr"),
 ) -> None:
     file, start, end = parse_target(target)
 
@@ -59,16 +65,33 @@ def main(
     # git wants the path relative to the repo root
     rel = path.relative_to(repo).as_posix()
 
+    content = path.read_text(errors="replace")
+    current = content.splitlines()[start - 1 : end]
+
+    # Strategy 1: git log -L (fast, line-focused, but has merge blind spots)
     try:
         steps = history.line_history(repo, rel, start, end)
     except history.GitError as e:
         typer.secho(f"git error: {e}", fg="red", err=True)
         raise typer.Exit(1)
 
+    # Strategy 2: pickaxe walk (slower, catches what -L misses). Only for small
+    # ranges — walking 200 lines individually would take forever.
+    if not no_pickaxe and len(current) <= MAX_PICKAXE_LINES:
+        walker = PickaxeWalker(repo)
+        for text in current:
+            walker.walk(rel, text, content)
+        steps = merge_timelines(steps, walker.found, walker.lineage)
+        if debug:
+            typer.secho(
+                f"[debug] pickaxe: {walker.searches} git searches, "
+                f"{len(walker.found)} commits, {sum(s.found_by == 'pickaxe' for s in steps)} new",
+                fg="yellow", err=True,
+            )
+
     if not show_noise:
         steps = noise.classify_all(steps)
 
-    current = path.read_text(errors="replace").splitlines()[start - 1 : end]
     render(rel, start, end, current, steps)
 
 

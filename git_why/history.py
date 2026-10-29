@@ -1,15 +1,12 @@
 """
 history.py — talk to git and turn its output into Python objects.
 
-The whole tool is built on one git command:
+Two git commands power the tool:
 
-    git log -L <start>,<end>:<file>
+    git log -L <start>,<end>:<file>          (line-range tracking)
+    git log -G <regex> --follow -p -- <file> (the "pickaxe": search diffs)
 
-which answers: "show me every commit that changed THESE LINES, following them
-back through time (even across file renames)". For each commit git prints the
-commit info plus a small diff showing how the lines changed.
-
-Our job here is just to run that command and parse the result.
+Both print commit headers followed by diffs, so one parser handles both.
 """
 
 from __future__ import annotations
@@ -19,11 +16,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # We ask git to print each commit header on one line using a separator that
-# will never appear in real commit messages. %x1f is the ASCII "unit separator".
+# will never appear in real commit messages. \x1f is the ASCII "unit separator".
 SEP = "\x1f"
 HEADER_PREFIX = "@@GITWHY@@"
-# Fields: hash, short hash, author, author email, ISO date, subject, full body
-FORMAT = f"{HEADER_PREFIX}{SEP}%H{SEP}%h{SEP}%an{SEP}%ae{SEP}%aI{SEP}%s{SEP}%b"
+# Fields: hash, short hash, author, email, ISO date, unix timestamp, subject, body
+FORMAT = f"{HEADER_PREFIX}{SEP}%H{SEP}%h{SEP}%an{SEP}%ae{SEP}%aI{SEP}%ct{SEP}%s{SEP}%b"
+
+
+@dataclass
+class Hunk:
+    """One '@@ ... @@' block of a diff: the lines removed and added together."""
+
+    removed: list[str] = field(default_factory=list)
+    added: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -35,16 +40,39 @@ class Step:
     author: str
     email: str
     date: str  # ISO 8601, e.g. 2023-11-19T10:22:01+00:00
+    timestamp: int  # unix commit time, used for sorting
     subject: str  # first line of commit message
     body: str  # the rest of the commit message
     file_before: str | None = None  # path before this commit (None if created)
     file_after: str | None = None  # path after this commit
-    removed: list[str] = field(default_factory=list)  # lines taken away ("-")
-    added: list[str] = field(default_factory=list)  # lines put in ("+")
+    hunks: list[Hunk] = field(default_factory=list)
 
-    # These get filled in later by noise.py
+    # Which strategy discovered this commit: "range" (git log -L) or "pickaxe".
+    found_by: str = "range"
+
+    # Filled in later by noise.py
     is_noise: bool = False
     noise_reason: str = ""
+
+    # --- convenience views -------------------------------------------------
+
+    @property
+    def removed(self) -> list[str]:
+        return [l for h in self.hunks for l in h.removed]
+
+    @property
+    def added(self) -> list[str]:
+        return [l for h in self.hunks for l in h.added]
+
+    @property
+    def is_origin(self) -> bool:
+        """True if the line(s) were brand new in this commit (nothing replaced)."""
+        return bool(self.added) and not self.removed
+
+    @property
+    def is_deletion(self) -> bool:
+        """True if this commit removed the line(s) without replacing them."""
+        return bool(self.removed) and not self.added
 
     @property
     def message(self) -> str:
@@ -52,8 +80,11 @@ class Step:
 
     @property
     def day(self) -> str:
-        """Just the YYYY-MM-DD part of the date."""
         return self.date[:10]
+
+    def focus(self, removed: list[str], added: list[str]) -> None:
+        """Replace all hunks with a single hunk containing only the lines we care about."""
+        self.hunks = [Hunk(removed=list(removed), added=list(added))]
 
 
 class GitError(RuntimeError):
@@ -62,41 +93,63 @@ class GitError(RuntimeError):
 
 def run_git(args: list[str], cwd: Path) -> str:
     """Run a git command and return its stdout as text (raises on failure)."""
-    result = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-    )
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
     if result.returncode != 0:
         raise GitError(result.stderr.strip() or f"git {' '.join(args)} failed")
     return result.stdout
 
 
+# ---------------------------------------------------------------------------
+# Strategy 1: git log -L
+# ---------------------------------------------------------------------------
+
 def line_history(repo: Path, file: str, start: int, end: int) -> list[Step]:
+    """Commits that touched lines start..end of `file`, newest first."""
+    out = run_git(
+        ["log", f"-L{start},{end}:{file}", f"--format={FORMAT}", "--no-color"],
+        cwd=repo,
+    )
+    return parse_log(out)
+
+
+# ---------------------------------------------------------------------------
+# Strategy 2: git log -G (pickaxe) — see pickaxe.py for the walking logic
+# ---------------------------------------------------------------------------
+
+def pickaxe_search(repo: Path, file: str, regex: str) -> list[Step]:
     """
-    Return the list of commits that touched lines start..end of `file`,
-    newest first. This is the function everything else is built on.
+    Commits whose diff of `file` has a +/- line matching `regex`, newest first.
+    --follow makes git keep tracking the file across renames.
+    -U0 means "no context lines" so hunks contain only real changes.
     """
     out = run_git(
         [
             "log",
-            f"-L{start},{end}:{file}",
-            f"--format={FORMAT}",
+            f"-G{regex}",
+            "--follow",
+            "-p",
+            "-U0",
+            "-M",
             "--no-color",
+            f"--format={FORMAT}",
+            "--",
+            file,
         ],
         cwd=repo,
     )
-    return _parse(out)
+    return parse_log(out)
 
 
-def _parse(text: str) -> list[Step]:
+# ---------------------------------------------------------------------------
+# Parser shared by both strategies
+# ---------------------------------------------------------------------------
+
+def parse_log(text: str) -> list[Step]:
     """
     Walk through git's output line by line.
 
-    The output looks like (simplified):
-
         @@GITWHY@@<sep>sha<sep>...<sep>subject<sep>body
+        more body lines...
         diff --git a/old.py b/new.py
         --- a/old.py
         +++ b/new.py
@@ -104,21 +157,19 @@ def _parse(text: str) -> list[Step]:
         -    old line
         +    new line
         @@GITWHY@@<sep>...     <- next commit
-
-    We create a new Step when we see a header, and attach the diff lines that
-    follow to it.
     """
     steps: list[Step] = []
     current: Step | None = None
-    in_body = False  # multi-line bodies continue until the diff starts
+    hunk: Hunk | None = None
+    in_body = False  # body lines continue until the first "diff --git"
 
     for raw in text.splitlines():
         if raw.startswith(HEADER_PREFIX):
             parts = raw.split(SEP)
-            # parts[0] is the prefix; the rest are our fields
-            _, sha, short, author, email, date, subject, body = (parts + [""] * 8)[:8]
-            current = Step(sha, short, author, email, date, subject, body)
+            _, sha, short, author, email, date, ts, subject, body = (parts + [""] * 9)[:9]
+            current = Step(sha, short, author, email, date, int(ts or 0), subject, body)
             steps.append(current)
+            hunk = None
             in_body = True
             continue
 
@@ -127,26 +178,28 @@ def _parse(text: str) -> list[Step]:
 
         if raw.startswith("diff --git"):
             in_body = False
+            hunk = None
             continue
-        if raw.startswith("--- "):
-            in_body = False
-            current.file_before = _clean_path(raw[4:])
-            continue
-        if raw.startswith("+++ "):
-            current.file_after = _clean_path(raw[4:])
-            continue
-        if raw.startswith("@@"):
-            continue  # hunk header, we don't need the numbers
-        if raw.startswith("-") and not in_body:
-            current.removed.append(raw[1:])
-            continue
-        if raw.startswith("+") and not in_body:
-            current.added.append(raw[1:])
-            continue
+
         if in_body:
-            # Git prints the body lines right after the header (because %b can
-            # span multiple lines). Keep appending them.
+            # Git prints body lines right after the header (because %b can span
+            # multiple lines). Keep appending them. Bullet lists starting with
+            # "-" are safe here because we check in_body first.
             current.body = (current.body + "\n" + raw).strip("\n")
+            continue
+
+        if raw.startswith("--- "):
+            current.file_before = _clean_path(raw[4:])
+        elif raw.startswith("+++ "):
+            current.file_after = _clean_path(raw[4:])
+        elif raw.startswith("@@"):
+            hunk = Hunk()
+            current.hunks.append(hunk)
+        elif raw.startswith("-") and hunk is not None:
+            hunk.removed.append(raw[1:])
+        elif raw.startswith("+") and hunk is not None:
+            hunk.added.append(raw[1:])
+        # anything else (index lines, "\ No newline at end of file", ...) is ignored
 
     return steps
 
