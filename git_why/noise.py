@@ -36,27 +36,33 @@ def classify(step: Step) -> Step:
     if step.is_noise:
         return step
 
-    # 1. Line was created here — that's never noise, it's the origin story.
+    before = _squash(step.removed)
+    after = _squash(step.added)
+
+    # 1. Only blank lines were added/removed (typical git log -L range drift).
+    if not before and not after and (step.removed or step.added):
+        step.is_noise = True
+        step.noise_reason = "blank lines only"
+        return step
+
+    # 2. Line was created here — that's never noise, it's the origin story.
     if step.is_origin:
         step.is_noise = False
         return step
 
-    before = _squash(step.removed)
-    after = _squash(step.added)
-
-    # 2. Same text once whitespace is ignored => formatting-only.
+    # 3. Same text once whitespace is ignored => formatting-only.
     if before == after and (step.removed or step.added):
         step.is_noise = True
         step.noise_reason = "whitespace / formatting only"
         return step
 
-    # 3. File path changed but content didn't => pure move/rename.
+    # 4. File path changed but content didn't => pure move/rename.
     if step.file_before != step.file_after and before == after:
         step.is_noise = True
         step.noise_reason = f"moved from {step.file_before}"
         return step
 
-    # 4. Content changed, but the message screams "style" and the change is tiny
+    # 5. Content changed, but the message screams "style" and the change is tiny
     #    (e.g. quote style, trailing comma). Be conservative: only if almost equal.
     if NOISE_WORDS.search(step.subject) and _similar(before, after):
         step.is_noise = True

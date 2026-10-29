@@ -30,15 +30,38 @@ from pathlib import Path
 
 from .history import GitError, Step, pickaxe_search, run_git
 
-MAX_DEPTH = 8          # how many text versions back we are willing to go
+MAX_DEPTH = 8  # how many text versions back we are willing to go
+CONFLICT_MARKERS = ("<<<<<<<", "=======", ">>>>>>>", "|||||||")
 MIN_SIMILARITY = 0.45  # how alike a removed line must be to count as "the previous version"
-MIN_SIGNAL_CHARS = 6   # don't pickaxe-search super generic lines like "}" or "pass"
+MIN_SIGNAL_CHARS = 6  # don't pickaxe-search super generic lines like "}" or "pass"
 
 # Lines so common that searching for them would return half the repo.
 BORING = {
-    "", "}", "{", "};", ")", ");", "]", "pass", "else:", "else", "return",
-    "return None", "break", "continue", "end", "fi", "done", "/>", "</div>",
-    '"""', "'''", "*/", "/*", "#", "//",
+    "",
+    "}",
+    "{",
+    "};",
+    ")",
+    ");",
+    "]",
+    "pass",
+    "else:",
+    "else",
+    "return",
+    "return None",
+    "break",
+    "continue",
+    "end",
+    "fi",
+    "done",
+    "/>",
+    "</div>",
+    '"""',
+    "'''",
+    "*/",
+    "/*",
+    "#",
+    "//",
 }
 
 
@@ -84,6 +107,9 @@ class PickaxeWalker:
         # Every text the line has ever had (stripped). This is the "lineage" and
         # lets us tell which lines in a big -L hunk are really about our line.
         self.lineage: set[str] = set()
+        # Historical paths of the file (learned from diffs); merge searches
+        # cannot use --follow, so they need these explicitly.
+        self.paths: set[str] = set()
         self.searches = 0  # for --debug / curiosity
 
     # -- public ---------------------------------------------------------------
@@ -114,11 +140,13 @@ class PickaxeWalker:
             return True  # e.g. root commit; be permissive
         return _count(content, text) <= 1
 
-    def _search(self, file: str, text: str) -> list[Step]:
-        key = (file, text.strip())
+    def _search(self, file: str, text: str, *, merges: bool = False) -> list[Step]:
+        key = (("merges:" if merges else "") + file, text.strip())
         if key not in self._cache:
             self.searches += 1
-            self._cache[key] = pickaxe_search(self.repo, file, anchored_regex(text))
+            self._cache[key] = pickaxe_search(
+                self.repo, file, anchored_regex(text), merges=merges, extra_paths=sorted(self.paths)
+            )
         return self._cache[key]
 
     def _walk(self, file: str, text: str, depth: int) -> None:
@@ -126,31 +154,40 @@ class PickaxeWalker:
         if depth > MAX_DEPTH or not worth_searching(text):
             return
 
-        for step in self._search(file, text):
+        introduced = self._walk_steps(self._search(file, text), file, text, depth)
+        if not introduced:
+            # No ordinary commit added this text. A merge may have (conflict
+            # resolution / "evil merge"); those are invisible to plain -G.
+            self._walk_steps(self._search(file, text, merges=True), file, text, depth)
+
+    def _walk_steps(self, candidates: list[Step], file: str, text: str, depth: int) -> bool:
+        """Process search results for ``text``. Returns True if some commit added it."""
+        introduced = False
+        for step in candidates:
+            for p in (step.file_before, step.file_after):
+                if p:
+                    self.paths.add(p)
             if step.sha in self.seen:
                 continue
 
             # Find the hunk where this text was ADDED.
-            hit = next(
-                (h for h in step.hunks if any(same(l, text) for l in h.added)), None
-            )
+            hit = next((h for h in step.hunks if any(same(l, text) for l in h.added)), None)
             if hit is None:
                 # The commit only REMOVED the text. Either it was changed into a
                 # newer version (that story is told when walking from the newer
                 # text, so skip) or it was simply deleted — worth recording,
                 # because the line evidently came back later.
-                gone = next(
-                    (h for h in step.hunks if any(same(l, text) for l in h.removed)), None
-                )
+                gone = next((h for h in step.hunks if any(same(l, text) for l in h.removed)), None)
                 if gone is not None and self._best_predecessor(gone.added, text) is None:
                     self.seen.add(step.sha)
-                    step.found_by = "pickaxe"
+                    step.found_by = "merge" if step.is_merge else "pickaxe"
                     step.focus([next(l for l in gone.removed if same(l, text))], [])
                     self.found.append(step)
                 continue
 
+            introduced = True
             self.seen.add(step.sha)
-            step.found_by = "pickaxe"
+            step.found_by = "merge" if step.is_merge else "pickaxe"
             added_line = next(l for l in hit.added if same(l, text))
 
             # Was the exact same text also removed in this hunk? Then the
@@ -163,20 +200,30 @@ class PickaxeWalker:
                 continue
 
             # Otherwise: which removed line is the previous version of ours?
-            predecessor = self._best_predecessor(hit.removed, text)
-            step.focus([predecessor] if predecessor is not None else [], [added_line])
+            removed_lines = [l for l in hit.removed if not l.strip().startswith(CONFLICT_MARKERS)]
+            predecessor = self._best_predecessor(removed_lines, text)
+            if step.is_merge:
+                # A conflict resolution replaced *both* sides' versions; show them all.
+                step.focus(removed_lines, [added_line])
+            else:
+                step.focus([predecessor] if predecessor is not None else [], [added_line])
             self.found.append(step)
 
-            if predecessor is not None:
-                if not self._unambiguous_before(step, predecessor):
-                    # Several identical lines existed back then — stop here and
-                    # let git log -L carry the older history.
-                    self.lineage.add(predecessor.strip())
-                    continue
-                # Keep searching from the *current* path: --follow already walks
-                # renames backwards from HEAD, and this keeps the cache warm.
-                self._walk(file, predecessor, depth + 1)
-            # else: born here — nothing older to look for along this path.
+            if predecessor is None:
+                continue  # born here — nothing older to look for along this path
+            if step.is_merge:
+                for older in removed_lines:  # follow every side of the conflict
+                    self._walk(file, older, depth + 1)
+                continue
+            if not self._unambiguous_before(step, predecessor):
+                # Several identical lines existed back then — stop here and
+                # let git log -L carry the older history.
+                self.lineage.add(predecessor.strip())
+                continue
+            # Keep searching from the *current* path: --follow already walks
+            # renames backwards from HEAD, and this keeps the cache warm.
+            self._walk(file, predecessor, depth + 1)
+        return introduced
 
     @staticmethod
     def _best_predecessor(candidates: list[str], text: str) -> str | None:
@@ -191,6 +238,7 @@ class PickaxeWalker:
 # ---------------------------------------------------------------------------
 # Merging the two strategies
 # ---------------------------------------------------------------------------
+
 
 def merge_timelines(
     range_steps: list[Step],
@@ -214,9 +262,7 @@ def merge_timelines(
     return sorted(by_sha.values(), key=lambda s: s.timestamp, reverse=True)
 
 
-def _trim_to_lineage(
-    range_steps: list[Step], pickaxe_steps: list[Step], lineage: set[str]
-) -> list[Step]:
+def _trim_to_lineage(range_steps: list[Step], pickaxe_steps: list[Step], lineage: set[str]) -> list[Step]:
     if not pickaxe_steps:
         return range_steps  # nothing to cross-check against
 

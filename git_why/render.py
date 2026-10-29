@@ -1,121 +1,249 @@
 """
-render.py — print the timeline nicely in the terminal using `rich`.
+render.py — present a Report as rich terminal output, plain text, or JSON.
+
+Renderers only format; every fact and judgement comes from ``report.py``.
 """
 
 from __future__ import annotations
 
+import json
+import sys
+from typing import IO
+
 from rich.console import Console
-from rich.text import Text
+from rich.markup import escape
 
 from .history import Step
-from .refs import refs_for
+from .report import Report
 
-console = Console()
-
-HIDDEN_TAG = "[bold red]⚡ invisible to git blame[/bold red]"
-
-
-def render(file: str, start: int, end: int, current_lines: list[str], steps: list[Step]) -> None:
-    where = f"{file}:{start}" if start == end else f"{file}:{start}-{end}"
-    console.print()
-    console.print(f"  [bold]{where}[/bold]")
-    for line in current_lines:
-        console.print(f"  [dim]│[/dim] [cyan]{line.rstrip()}[/cyan]")
-    console.print()
-
-    # git gives newest first; a story reads better oldest first.
-    first_origin = next((s for s in reversed(steps) if s.is_origin), None)
-    single = start == end
-    for step in reversed(steps):
-        # "re-created" is only meaningful for one line; in a range, different
-        # lines simply have different birthdays.
-        _render_step(step, reborn=single and step.is_origin and step is not first_origin)
-
-    console.print()
-    _render_summary(steps)
-    console.print()
+KIND_BULLET = {"origin": "●", "change": "●", "deletion": "✕", "noise": "○"}
+FOUND_BY_TAG = {
+    "pickaxe": "invisible to git blame",
+    "merge": "changed by the merge itself",
+}
 
 
-def _render_step(step: Step, reborn: bool = False) -> None:
-    refs = refs_for(step)
-    hidden = f"  {HIDDEN_TAG}" if step.found_by == "pickaxe" else ""
+def _tag(report: Report, step: Step) -> str | None:
+    if step.is_merge or step.found_by == "merge":
+        return FOUND_BY_TAG["merge"]
+    if step.found_by == "pickaxe" and report.target.text is not None:
+        return None  # in --text mode everything comes from the pickaxe; nothing to compare against
+    return FOUND_BY_TAG.get(step.found_by)
+
+
+def _noun(report: Report) -> str:
+    if report.target.function:
+        return "function"
+    return "line" if report.target.start == report.target.end else "lines"
+
+
+# ---------------------------------------------------------------------------
+# JSON
+# ---------------------------------------------------------------------------
+
+
+def render_json(report: Report, out: IO[str] | None = None) -> None:
+    out = out or sys.stdout
+    json.dump(report.to_dict(), out, indent=2, ensure_ascii=False)
+    out.write("\n")
+
+
+# ---------------------------------------------------------------------------
+# Rich
+# ---------------------------------------------------------------------------
+
+
+def render_rich(report: Report, *, color: bool | None = None, max_body: int = 6, out: IO[str] | None = None) -> None:
+    out = out or sys.stdout
+    console = Console(
+        file=out, force_terminal=color if color is not None else None, no_color=color is False, soft_wrap=True
+    )
+    p = console.print
+
+    p()
+    p(f"  [bold]{escape(report.target.label)}[/bold]")
+    for line in report.target.lines[:8]:
+        p(f"  [dim]│[/dim] [cyan]{escape(line.rstrip())}[/cyan]")
+    if len(report.target.lines) > 8:
+        p(f"  [dim]│ … {len(report.target.lines) - 8} more lines[/dim]")
+    p()
+
+    first_origin = next((s for s in reversed(report.steps) if s.is_origin), None)
+    single = report.target.start == report.target.end and not report.target.function
+    shown: set[int] = set()
+    for step in reversed(report.steps):
+        _rich_step(
+            report,
+            step,
+            p,
+            reborn=single and step.is_origin and step is not first_origin,
+            max_body=max_body,
+            shown=shown,
+        )
+
+    p()
+    p(f"  [bold]Summary[/bold] [dim](inferred)[/dim]: {escape(report.summary())}")
+    conf = report.confidence()
+    colour = {"high": "green", "medium": "yellow", "low": "red"}[conf.level]
+    p(f"  [bold]Confidence:[/bold] [{colour}]{conf.level}[/{colour}]")
+    for reason in conf.reasons:
+        p(f"    [dim]- {escape(reason)}[/dim]")
+    for w in report.warnings + report.github.warnings:
+        p(f"  [yellow]warning:[/yellow] {escape(w)}")
+    p()
+
+
+def _rich_step(report: Report, step: Step, p, *, reborn: bool, max_body: int, shown: set[int]) -> None:  # type: ignore[no-untyped-def]
+    tag = _tag(report, step)
+    tag_md = f"  [bold red]⚡ {tag}[/bold red]" if tag else ""
 
     if step.is_noise:
-        line = Text.assemble(
-            (f"{step.day}  ", "dim"),
-            (f"{step.short_sha}  ", "dim"),
-            (f"{step.subject}", "dim"),
-            (f"   ({step.noise_reason}, skipped)", "dim italic"),
+        p(
+            f"  [dim]○ {step.day}  {step.short_sha}  {escape(step.subject)}"
+            f"   [italic]({escape(step.noise_reason)}, skipped)[/italic][/dim]"
         )
-        console.print("  [dim]○[/dim] ", end="")
-        console.print(line)
         return
 
-    if step.is_origin:
-        bullet = "[bold green]●[/bold green]"
-    elif step.is_deletion:
-        bullet = "[bold red]✕[/bold red]"
-    else:
-        bullet = "[bold yellow]●[/bold yellow]"
-    console.print(
-        f"  {bullet} [bold]{step.day}[/bold]  [magenta]{step.short_sha}[/magenta]  "
-        f"{_quote(step.subject)}  [dim]({step.author})[/dim]{hidden}"
+    colour = {"origin": "green", "deletion": "red"}.get(step.kind, "yellow")
+    p(
+        f"  [bold {colour}]{KIND_BULLET[step.kind]}[/bold {colour}] [bold]{step.day}[/bold]  "
+        f'[magenta]{step.short_sha}[/magenta]  "{escape(step.subject.strip())}"  '
+        f"[dim]({escape(step.author)})[/dim]{tag_md}"
     )
     if step.is_origin:
-        where = f" [dim]in {step.file_after}[/dim]" if step.file_after else ""
-        verb = "line re-created here" if reborn else "line created here"
-        console.print(f"  [dim]│[/dim]   [green]{verb}[/green]{where}")
-        for a in step.added:
-            console.print(f"  [dim]│[/dim]   [green]+ {a.rstrip()}[/green]")
+        where = f" [dim]in {escape(step.file_after)}[/dim]" if step.file_after else ""
+        noun = _noun(report)
+        verb = f"{noun} re-created here" if reborn else f"{noun} created here"
+        if step.shallow_boundary:
+            verb = "history starts here (shallow clone boundary)"
+        p(f"  [dim]│[/dim]   [green]{verb}[/green]{where}")
     elif step.is_deletion:
-        console.print(f"  [dim]│[/dim]   [red]line deleted here[/red] [dim](it came back later)[/dim]")
-        for r in step.removed:
-            console.print(f"  [dim]│[/dim]   [red]- {r.rstrip()}[/red]")
-    else:
-        for r in step.removed:
-            console.print(f"  [dim]│[/dim]   [red]- {r.rstrip()}[/red]")
-        for a in step.added:
-            console.print(f"  [dim]│[/dim]   [green]+ {a.rstrip()}[/green]")
+        p("  [dim]│[/dim]   [red]line deleted here[/red] [dim](it came back later)[/dim]")
+    for r in step.removed[:12]:
+        p(f"  [dim]│[/dim]   [red]- {escape(r.rstrip())}[/red]")
+    for a in step.added[:12]:
+        p(f"  [dim]│[/dim]   [green]+ {escape(a.rstrip())}[/green]")
+    if len(step.removed) > 12 or len(step.added) > 12:
+        p(f"  [dim]│   … ({len(step.removed)} removed, {len(step.added)} added in total)[/dim]")
 
-    # The commit body is where the "why" usually lives — show it.
     body = step.body.strip()
     if body:
-        for bl in body.splitlines()[:6]:  # don't flood the screen
-            console.print(f"  [dim]│[/dim]   [dim]{bl}[/dim]")
+        lines = body.splitlines()
+        for bl in lines[:max_body]:
+            p(f"  [dim]│   {escape(bl)}[/dim]")
+        if len(lines) > max_body:
+            p(f"  [dim]│   … ({len(lines) - max_body} more lines)[/dim]")
 
-    for r in refs:
-        console.print(f"  [dim]└─[/dim] [blue]{r}[/blue]")
+    if step.landed_via is not None:
+        lv = step.landed_via
+        p(f'  [dim]│   landed via merge {lv.short_sha} "{escape(lv.subject.strip())}" on {lv.day}[/dim]')
+
+    for ref in report.refs(step):
+        p(f"  [dim]├─[/dim] [blue]{escape(str(ref))}[/blue]")
+
+    for thread in report.threads_for(step):
+        if thread.number in shown:
+            kind = "PR" if thread.kind == "pr" else "issue"
+            p(f"  [dim]│   {kind} #{thread.number} {escape(thread.title)} (shown above)[/dim]")
+            continue
+        shown.add(thread.number)
+        _rich_thread(thread, p)
+
+    strength = report.evidence_strength(step)
+    url = report.commit_url(step.sha)
+    tail = f"  [dim]evidence: {strength}" + (f"  {escape(url)}" if url else "") + "[/dim]"
+    p(tail)
 
 
-def _render_summary(steps: list[Step]) -> None:
-    """A plain-English recap. (Later: optional LLM-written summary.)"""
-    real = [s for s in steps if not s.is_noise]
-    if not real:
-        console.print("  [dim]No meaningful history found.[/dim]")
-        return
-    origin = real[-1]  # oldest real commit
-    changes = real[:-1]  # newer real commits
-    noise = len(steps) - len(real)
-    hidden = sum(1 for s in steps if s.found_by == "pickaxe")
+def _rich_thread(thread, p) -> None:  # type: ignore[no-untyped-def]
+    kind = "PR" if thread.kind == "pr" else "issue"
+    p(
+        f"  [dim]│[/dim]   [bold blue]{kind} #{thread.number}[/bold blue] {escape(thread.title)} "
+        f"[dim]({thread.state}, @{escape(thread.author)})[/dim]"
+    )
+    p(f"  [dim]│     {escape(thread.url)}[/dim]")
+    if thread.body:
+        for bl in [b for b in thread.body.splitlines() if b.strip()][:4]:
+            p(f"  [dim]│[/dim]     [italic]{escape(bl)}[/italic]")
+    if thread.linked_issues:
+        p(f"  [dim]│     links: {', '.join('#' + str(n) for n in thread.linked_issues)}[/dim]")
+    for c in thread.comments[:3]:
+        loc = f" on {c.path}" if c.path else ""
+        first = c.body.splitlines()[0] if c.body else ""
+        p(f"  [dim]│[/dim]     [blue]@{escape(c.author)}[/blue] [dim]({c.kind}{escape(loc)})[/dim]: {escape(first)}")
 
-    parts = [f"Introduced on {origin.day} by {origin.author} ({_quote(origin.subject)})"]
-    o_refs = refs_for(origin)
-    if o_refs:
-        parts[-1] += f" — linked to {', '.join(str(r) for r in o_refs)}"
-    if changes:
-        parts.append(
-            f"changed meaningfully {len(changes)} time{'s' if len(changes) != 1 else ''} since, "
-            f"most recently on {changes[0].day} by {changes[0].author}"
+
+# ---------------------------------------------------------------------------
+# Plain text (no colour, no box drawing — safe for pipes and logs)
+# ---------------------------------------------------------------------------
+
+
+def render_plain(report: Report, *, max_body: int = 6, out: IO[str] | None = None) -> None:
+    out = out or sys.stdout
+    w = out.write
+    w(f"{report.target.label}\n")
+    for line in report.target.lines[:8]:
+        w(f"  | {line.rstrip()}\n")
+    w("\n")
+
+    first_origin = next((s for s in reversed(report.steps) if s.is_origin), None)
+    single = report.target.start == report.target.end and not report.target.function
+    shown: set[int] = set()
+    for step in reversed(report.steps):
+        reborn = single and step.is_origin and step is not first_origin
+        if step.is_noise:
+            w(f"o {step.day} {step.short_sha} {step.subject}  [{step.noise_reason}, skipped]\n")
+            continue
+        marker = {"origin": "*", "deletion": "x"}.get(step.kind, "*")
+        tag = _tag(report, step)
+        w(
+            f'{marker} {step.day} {step.short_sha} "{step.subject.strip()}" ({step.author})'
+            + (f"  [{tag}]" if tag else "")
+            + "\n"
         )
-    if noise:
-        parts.append(f"{noise} formatting/move commit{'s' if noise != 1 else ''} ignored")
-    if hidden:
-        parts.append(
-            f"[bold red]{hidden} commit{'s' if hidden != 1 else ''} recovered that git blame / git log -L cannot see[/bold red]"
-        )
+        if step.is_origin:
+            noun = _noun(report)
+            verb = (
+                "history starts here (shallow clone boundary)"
+                if step.shallow_boundary
+                else (f"{noun} re-created here" if reborn else f"{noun} created here")
+            )
+            w(f"    {verb}" + (f" in {step.file_after}" if step.file_after else "") + "\n")
+        elif step.is_deletion:
+            w("    line deleted here (it came back later)\n")
+        for r in step.removed[:12]:
+            w(f"    - {r.rstrip()}\n")
+        for a in step.added[:12]:
+            w(f"    + {a.rstrip()}\n")
+        body = step.body.strip()
+        if body:
+            for bl in body.splitlines()[:max_body]:
+                w(f"    {bl}\n")
+        if step.landed_via is not None:
+            lv = step.landed_via
+            w(f'    landed via merge {lv.short_sha} "{lv.subject.strip()}" on {lv.day}\n')
+        for ref in report.refs(step):
+            w(f"    -> {ref}\n")
+        for t in report.threads_for(step):
+            kind = "PR" if t.kind == "pr" else "issue"
+            if t.number in shown:
+                w(f"    {kind} #{t.number}: {t.title} (shown above)\n")
+                continue
+            shown.add(t.number)
+            w(f"    {kind} #{t.number}: {t.title} ({t.state}, @{t.author}) {t.url}\n")
+            if t.body:
+                w(f"      {t.body.splitlines()[0]}\n")
+            for c in t.comments[:3]:
+                first = c.body.splitlines()[0] if c.body else ""
+                w(f"      @{c.author} ({c.kind}): {first}\n")
+        url = report.commit_url(step.sha)
+        w(f"    evidence: {report.evidence_strength(step)}" + (f"  {url}" if url else "") + "\n")
 
-    console.print("  [bold]Summary:[/bold] " + "; ".join(parts) + ".")
-
-
-def _quote(s: str) -> str:
-    return f'"{s.strip()}"'
+    w("\n")
+    w(f"Summary (inferred): {report.summary()}\n")
+    conf = report.confidence()
+    w(f"Confidence: {conf.level}\n")
+    for reason in conf.reasons:
+        w(f"  - {reason}\n")
+    for warning in report.warnings + report.github.warnings:
+        w(f"warning: {warning}\n")
