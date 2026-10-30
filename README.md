@@ -118,7 +118,7 @@ first-parent diff). Tested in CI on Linux and macOS; Windows is expected to
 work but is not part of CI yet.
 
 ```bash
-pipx install git-why-trace        # or: pip install git-why-trace   (once published)
+pipx install git-why-trace        # or: pip install git-why-trace
 # from source:
 pip install .
 ```
