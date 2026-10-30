@@ -218,3 +218,20 @@ def test_render_long_bodies_and_hunks_are_truncated(make_repo) -> None:  # type:
     assert "… (17 more lines)" in out
     assert "removed, 30 added in total" in out
     assert "… 22 more lines" in out
+
+
+def test_render_json_is_safe_for_cp1251_stream(tmp_path: Path) -> None:
+    report = sample_report(tmp_path)
+    report.steps[0].subject = "contains emoji 🪦"
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1251")
+    render_json(report, out=stream)
+    stream.flush()
+
+    serialized = raw.getvalue().decode("cp1251")
+    assert serialized.isascii()
+
+    data = json.loads(serialized)
+    assert data["schema_version"] == 1
+    assert "🪦" in json.dumps(data, ensure_ascii=False)

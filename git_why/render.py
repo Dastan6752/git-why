@@ -44,7 +44,7 @@ def _noun(report: Report) -> str:
 
 def render_json(report: Report, out: IO[str] | None = None) -> None:
     out = out or sys.stdout
-    json.dump(report.to_dict(), out, indent=2, ensure_ascii=False)
+    json.dump(report.to_dict(), out, indent=2, ensure_ascii=True)
     out.write("\n")
 
 

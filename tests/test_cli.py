@@ -67,18 +67,22 @@ def declared_options() -> set[str]:
 
 def options_panel_entries(help_output: str) -> set[str]:
     """
-    Long options that head a row of the "Options" panel. Only the panel counts:
-    an option mentioned in an example or another option's description does not
-    document it.
+    Long options that head a row of the Options panel.
     """
     lines = ANSI.sub("", help_output).splitlines()
-    starts = [i for i, line in enumerate(lines) if line.startswith("╭─ Options")]
-    assert len(starts) == 1, "expected exactly one Options panel"
+    starts = [
+        i for i, line in enumerate(lines) if line.lstrip().startswith(("\u256d\u2500 Options", "\u250c\u2500 Options"))
+    ]
+    assert len(starts) == 1, (
+        f"expected exactly one Options panel; candidates: {[repr(line) for line in lines if 'Options' in line]}"
+    )
+
     found: set[str] = set()
     for line in lines[starts[0] + 1 :]:
-        if line.startswith("╰"):
+        line = line.lstrip()
+        if line.startswith(("\u2570", "\u2514")):
             break
-        cells = line.strip("│ ").split()
+        cells = line.strip("\u2502 ").split()
         if cells and cells[0].startswith("--"):
             found.add(cells[0])
     return found
