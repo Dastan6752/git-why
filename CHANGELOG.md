@@ -23,6 +23,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- The distribution package is now named `git-why-trace`; the installed CLI command remains `git-why`.
 - Merge commits listed by `git log -L` that merely combined both sides'
   changes (no edits of their own under `--remerge-diff`) are now dimmed as
   *pass-through merges* instead of being reported as "changed by the merge

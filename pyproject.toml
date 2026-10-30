@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "git-why"
+name = "git-why-trace"
 version = "0.1.1"
 description = "Answer 'why is this line here?' — reconstruct a line's decision history from git, including what git blame cannot see."
 readme = "README.md"

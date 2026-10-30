@@ -118,7 +118,7 @@ first-parent diff). Tested in CI on Linux and macOS; Windows is expected to
 work but is not part of CI yet.
 
 ```bash
-pipx install git-why        # or: pip install git-why   (once published)
+pipx install git-why-trace        # or: pip install git-why-trace   (once published)
 # from source:
 pip install .
 ```
@@ -169,7 +169,7 @@ prints the same options with examples.
 ```json
 {
   "schema_version": 1,
-  "generator": {"name": "git-why", "version": "0.1.0"},
+  "generator": {"name": "git-why", "version": "0.1.1"},
   "target": {"file": "src/requests/adapters.py", "start": 81, "end": 81, "function": null, "text": null, "lines": ["DEFAULT_RETRIES = 0"]},
   "repo": {"root": "...", "head": "...", "shallow": false, "web_url": "https://github.com/psf/requests"},
   "strategies": {"range_tracking": true, "pickaxe": true, "lineage_complete": true, "merge_scan": false, "github": false},
