@@ -6,8 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-30
+
 ### Fixed
 
+- JSON output now safely escapes Unicode characters, preventing
+  Windows console encoding errors when using the --json option.
 - `git why --help` now shows the description and an *Examples* section (the
   text passed to `typer.Typer(help=...)` is ignored for single-command apps),
   and the usage line reads `git-why` instead of `main`.
@@ -71,5 +75,6 @@ First public release.
   CI on Linux/macOS for Python 3.10–3.13 with ruff, mypy, build and twine
   checks, and a Trusted-Publishing release workflow with a manual approval gate.
 
-[Unreleased]: https://github.com/Dastan6752/git-why/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Dastan6752/git-why/compare/v0.1.1...HEAD
 [0.1.0]: https://github.com/Dastan6752/git-why/releases/tag/v0.1.0
+[0.1.1]: https://github.com/Dastan6752/git-why/releases/tag/v0.1.1

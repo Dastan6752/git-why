@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "git-why"
-version = "0.1.0"
+version = "0.1.1"
 description = "Answer 'why is this line here?' — reconstruct a line's decision history from git, including what git blame cannot see."
 readme = "README.md"
 requires-python = ">=3.10"
