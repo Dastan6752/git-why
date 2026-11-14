@@ -8,6 +8,8 @@ reviewed it and what they said — following the line through renames, ignoring
 formatter noise, and recovering history that `git blame` and `git log -L`
 silently drop.
 
+![git-why demo: comparing git blame with git why](git-why-demo.gif.gif)
+
 ```
 $ git why src/payments/retry.py:42
 ```
@@ -118,7 +120,7 @@ first-parent diff). Tested in CI on Linux and macOS; Windows is expected to
 work but is not part of CI yet.
 
 ```bash
-pipx install git-why-trace        # or: pip install git-why-trace   (once published)
+pipx install git-why-trace        # or: pip install git-why-trace
 # from source:
 pip install .
 ```
