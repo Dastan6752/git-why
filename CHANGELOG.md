@@ -35,6 +35,16 @@ All notable changes to this project are documented here. The format follows
   JSON (`removed`, plus new `fallback`). Evidence items carry `quote`.
 - The fallback quote is the single most relevant exact sentence of that
   comment (not the whole comment); the full text stays in JSON `fallback.full`.
+- `--ask` distinguishes **code-explanation** questions ("What does this line
+  do?") from **history** questions ("Why was this added?") and says which it
+  detected. Code questions get the source at HEAD as citable evidence —
+  `[S1]` the line, `[S2]` the enclosing block (≤ 40 lines) — ahead of the
+  commits, with a prompt that forbids historical claims from code; history
+  questions keep commits/PRs/comments first and gain `[S1]` last. New validator
+  rule: a sentence cited only to source code is removed if it makes a
+  historical claim. Backtick quotes and whole-line code quotes count as
+  verbatim quotes. JSON `ask` gains `mode`; the report schema is unchanged.
+  (Found by a real run where the only quotable evidence was a commit title.)
 
 ## [0.1.1] - 2026-10-30
 
@@ -42,6 +52,9 @@ All notable changes to this project are documented here. The format follows
 
 - JSON output now safely escapes Unicode characters, preventing
   Windows console encoding errors when using the --json option.
+- Function extent detection no longer mistakes a `{` inside an f-string or
+  dict literal on the first body line for the start of a brace block (affected
+  `--function` ranges and the new `--ask` code context).
 - `git why --help` now shows the description and an *Examples* section (the
   text passed to `typer.Typer(help=...)` is ignored for single-command apps),
   and the usage line reads `git-why` instead of `main`.

@@ -32,7 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .evidence import DEFAULT_BUDGET, EvidencePack, Item, build, format_for_prompt
+from .evidence import DEFAULT_BUDGET, MODE_CODE, MODE_HISTORY, EvidencePack, Item, build, format_for_prompt
 from .report import Report
 
 DEFAULT_HOST = "http://127.0.0.1:11434"
@@ -70,6 +70,52 @@ SYSTEM_PROMPT = (
     'The PR discussion says that using 0 "will make it a magic number in this case" and considers a sentinel object '
     "[R2]. Not in the evidence: why the final value was set back to 0.\n"
 )
+
+SYSTEM_PROMPT_CODE = (
+    "You explain what a line of code does using ONLY the numbered evidence provided. The evidence starts with the "
+    "source code at HEAD: [S1] is the line itself and [S2] its enclosing block; commits and discussions follow.\n\n"
+    "Rules:\n"
+    "1. Every sentence that states a fact must (a) quote the code or evidence verbatim - at least three consecutive "
+    "words, or a whole line of code - inside backticks or double quotes, and (b) end with the IDs it comes from, "
+    "e.g. [S1] or [S2].\n"
+    "2. Describe only behaviour you can read in the quoted code: what is called, with which arguments, what is "
+    "returned or raised. Do not guess about code you cannot see.\n"
+    "3. Do not say when, why or by whom the line was written unless you quote a commit or discussion "
+    "([C1], [P1], [R1] ...) that says so. A code-level purpose is not a historical reason.\n"
+    "4. Do not add names, values or behaviour that are not in the quoted text.\n"
+    "5. If the question asks for something the evidence does not show (callers, runtime values, intent), end with "
+    'one sentence that starts with "Not in the evidence:". That sentence needs no quote or citation.\n'
+    f"6. Be brief: at most {MAX_WORDS} words, plain prose, no headings or bullet points.\n\n"
+    "Example of a correct answer:\n"
+    'The line calls `typer.secho(f"error: {message}", fg="red", err=True)`, which prints the message in red to '
+    "stderr [S1]. It is the first statement of `def _fail(message: str, code: int, hint: str | None = None)`, "
+    "which ends with `raise typer.Exit(code)` [S2]. Not in the evidence: where _fail is called from.\n"
+)
+
+# Words that make a question about *history* (why / when / who / what changed). Anything else is a
+# code-explanation question ("what does this do", "how does this work", "explain this line").
+_HISTORY_QUESTION = re.compile(
+    r"\bwhy\b|\bwhen\b|\bwho\b|\bwhom\b|\breasons?\b|\bhistor|\bchang(e|ed|es|ing)\b|\badded\b|\bintroduc"
+    r"|\bremov|\brevert|\bcommit|\bpull request|\bPRs?\b|\breview|\bdecid|\boriginal|\bbefore\b|\bused to\b"
+    r"|\bpurpose\b|\bmotivat|\bauthor|\bissue\b|\bago\b|\bbecame\b|\bever\b|\bsince\b|\bstill\b|\bchosen\b",
+    re.I,
+)
+
+
+def classify_question(question: str) -> str:
+    """``history`` if the question asks why/when/who/what changed; otherwise ``code``."""
+    return MODE_HISTORY if _HISTORY_QUESTION.search(question) else MODE_CODE
+
+
+MODE_LABEL = {MODE_HISTORY: "history", MODE_CODE: "code explanation"}
+
+USER_TEMPLATE_CODE = """Question: {question}
+
+Evidence:
+{evidence}
+
+Answer (quote the code verbatim and cite [S1]/[S2] after each factual sentence; \
+say "Not in the evidence:" for anything the code and history do not show):"""
 
 USER_TEMPLATE = """Question: {question}
 
@@ -132,6 +178,11 @@ class Fallback:
 
 
 NO_DECISION = "The evidence does not explain the final decision."
+NO_EXPLANATION = "The evidence shows the code, but the model produced no verified explanation of it."
+
+
+def closing_line(mode: str) -> str:
+    return NO_EXPLANATION if mode == MODE_CODE else NO_DECISION
 
 
 @dataclass
@@ -140,6 +191,7 @@ class Answer:
     # answered | insufficient_evidence | unavailable | no_model_selected
     status: str
     pack: EvidencePack
+    mode: str = MODE_HISTORY  # history | code (see classify_question)
     model: str | None = None
     host: str = DEFAULT_HOST
     sentences: list[Sentence] = field(default_factory=list)
@@ -166,6 +218,7 @@ class Answer:
     def to_dict(self) -> dict[str, Any]:
         return {
             "question": self.question,
+            "mode": self.mode,
             "status": self.status,
             "model": self.model,
             "host": self.host,
@@ -308,7 +361,11 @@ def setup_steps(target: str, question: str, installed: list[str] | None = None) 
 _CITE = re.compile(r"\[([A-Z]\d+(?:\s*,\s*[A-Z]\d+)*)\]")
 _SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])|\n+")
 # double quotes, curly double quotes, and curly single-quote PAIRS (a plain apostrophe is not a quote mark)
-_QUOTE = re.compile(r"[\"\u201c\u201d]([^\"\u201c\u201d]{3,}?)[\"\u201c\u201d]|\u2018([^\u2018\u2019]{3,}?)\u2019")
+_QUOTE = re.compile(
+    r"`(\S(?:[^`]*?\S)?)`"  # code spans: `like this` (no leading/trailing blank, so a stray pair is not a span)
+    r"|[\"\u201c\u201d]([^\"\u201c\u201d]{3,}?)[\"\u201c\u201d]"
+    r"|\u2018([^\u2018\u2019]{3,}?)\u2019"
+)
 _NORM = re.compile(r"[^a-z0-9 ]+")
 MIN_QUOTE_WORDS = 3
 
@@ -327,9 +384,27 @@ def normalise(text: str) -> str:
     return " ".join(_NORM.sub(" ", text).split())
 
 
-def quotes_in(sentence: str) -> list[str]:
-    found = [(a or b).strip() for a, b in _QUOTE.findall(sentence)]
-    return [q for q in found if len(q.split()) >= MIN_QUOTE_WORDS]
+def quote_spans(sentence: str) -> list[str]:
+    """Every quoted span, longest first when nested (a backtick span may contain double quotes)."""
+    spans: list[str] = []
+    for m in _QUOTE.finditer(sentence):
+        spans.append(next(g for g in m.groups() if g).strip())
+    return spans
+
+
+def quotes_in(sentence: str, sources: list[Item] | None = None) -> list[str]:
+    """
+    Quotes that count: at least ``MIN_QUOTE_WORDS`` words (after normalisation, so
+    ``sys.exit(code)`` is three), or a whole line of a cited code item.
+    """
+    code_lines = {normalise(line) for item in sources or [] if item.kind == "code" for line in item.quote.splitlines()}
+    code_lines.discard("")
+    out = []
+    for q in quote_spans(sentence):
+        n = normalise(q)
+        if len(n.split()) >= MIN_QUOTE_WORDS or n in code_lines:
+            out.append(q)
+    return out
 
 
 # --- reason claims -----------------------------------------------------------
@@ -356,6 +431,24 @@ _HEDGE_IN_SOURCE = re.compile(
 )
 REASON_NOT_IN_SOURCE = "states a reason, but the quoted source only raises a concern, question or suggestion"
 REASON_CONTRADICTED = 'states a reason while the answer also says "Not in the evidence" - the cautious sentence is kept'
+
+
+# Source code can show what a line does, never when, why or by whom it was written.
+_CLAIMS_HISTORY = re.compile(
+    r"\b(was|were|been|got|originally|later|previously|initially)\s+(\w+ly\s+)?"
+    r"(added|changed|introduced|removed|reverted|chosen|picked|set|renamed|moved|written|created|modified|updated|"
+    r"fixed|merged|replaced|tuned|rewritten)\b"
+    r"|\bcommit(s|ted)?\b|\bpull request|\bPRs?\b|\breview(er|ers|ed)?\b|\bauthor(s|ed)?\b|\bhistor(y|ical)"
+    r"|\boriginally\b|\bin (19|20)\d\d\b|\bissue #?\d+|\bbug #?\d+|\bago\b",
+    re.I,
+)
+HISTORY_FROM_CODE = "historical claim cited to source code, not to a commit or discussion"
+
+
+def claims_history(sentence: str) -> bool:
+    """Does the model's own wording (outside the quotes) say when/why/by whom the code was written?"""
+    outside = _QUOTE.sub(" ", sentence)
+    return bool(_CLAIMS_HISTORY.search(outside))
 
 
 def claims_reason(sentence: str) -> bool:
@@ -405,14 +498,17 @@ def validate(raw: str, pack: EvidencePack) -> tuple[list[Sentence], list[Removed
         if unknown:
             removed.append(Removed(sentence.strip(), f"unknown citation [{', '.join(unknown)}]"))
             continue
-        quotes = quotes_in(clean)
+        sources = [item for i in ids if (item := pack.get(i)) is not None]
+        quotes = quotes_in(clean, sources)
         if not quotes:
             removed.append(Removed(sentence.strip(), "no verbatim quote from the cited source"))
             continue
-        sources = [item for i in ids if (item := pack.get(i)) is not None]
         bad = [q for q in quotes if not quote_supported(q, sources)]
         if bad:
             removed.append(Removed(sentence.strip(), f'quote "{bad[0]}" not found in [{", ".join(ids)}]'))
+            continue
+        if all(item.kind == "code" for item in sources) and claims_history(clean):
+            removed.append(Removed(sentence.strip(), HISTORY_FROM_CODE))
             continue
         is_reason = claims_reason(clean)
         if is_reason and not quotes_state_reason(quotes):
@@ -443,10 +539,11 @@ def ask(
     host: str | None = None,
     budget: int = DEFAULT_BUDGET,
 ) -> Answer:
-    pack = build(report, budget=budget)
+    mode = classify_question(question)
+    pack = build(report, budget=budget, mode=mode)
     target = report.target.label
     host_url, host_error = resolve_host(host)
-    answer = Answer(question=question, status="unavailable", pack=pack, host=host_url)
+    answer = Answer(question=question, status="unavailable", pack=pack, mode=mode, host=host_url)
 
     if host_error:
         answer.message = host_error
@@ -486,7 +583,11 @@ def ask(
 
     try:
         raw = client.chat(
-            chosen, SYSTEM_PROMPT, USER_TEMPLATE.format(question=question, evidence=format_for_prompt(pack))
+            chosen,
+            SYSTEM_PROMPT_CODE if mode == MODE_CODE else SYSTEM_PROMPT,
+            (USER_TEMPLATE_CODE if mode == MODE_CODE else USER_TEMPLATE).format(
+                question=question, evidence=format_for_prompt(pack)
+            ),
         )
     except OllamaUnreachableError as exc:
         answer.message = f"the model request failed: {exc}"
@@ -498,7 +599,7 @@ def ask(
     has_fact = any(s.citations for s in answer.sentences)
     answer.status = "answered" if has_fact else "insufficient_evidence"
     if not has_fact:
-        answer.fallback = most_relevant_comment(pack, question, answer.removed)
+        answer.fallback = most_relevant_comment(pack, question, answer.removed, mode=mode)
         if not answer.sentences and not answer.fallback:
             answer.message = (
                 "the model produced no sentence that quotes and cites the evidence; the evidence may not answer this"
@@ -517,18 +618,26 @@ def _tokens(text: str) -> set[str]:
     return {t for t in _NORM.sub(" ", text.lower().replace("`", "")).split() if len(t) > 1 and t not in _STOPWORDS}
 
 
-def most_relevant_comment(pack: EvidencePack, question: str, removed: list[Removed]) -> Fallback | None:
+def most_relevant_comment(
+    pack: EvidencePack, question: str, removed: list[Removed], *, mode: str = MODE_HISTORY
+) -> Fallback | None:
     """
-    Pick the comment (else PR/issue description) that best matches the question and
-    whatever the model tried to quote. Deterministic: score, then pack order.
+    Pick the evidence to show when nothing factual survived: for history questions the
+    comment (else PR/issue description) that best matches the question and whatever the
+    model tried to quote; for code questions the code itself. Deterministic: score, then pack order.
     """
-    candidates = [i for i in pack.items if i.kind == "comment"] or [i for i in pack.items if i.kind in ("pr", "issue")]
+    if mode == MODE_CODE:
+        candidates = [i for i in pack.items if i.kind == "code"]
+    else:
+        candidates = [i for i in pack.items if i.kind == "comment"] or [
+            i for i in pack.items if i.kind in ("pr", "issue")
+        ]
     if not candidates:
         return None
     wanted = _tokens(question)
     pointed_at: set[str] = set()
     for r in removed:
-        wanted |= _tokens(" ".join(quotes_in(r.text)))
+        wanted |= _tokens(" ".join(quote_spans(r.text)))
         pointed_at |= {c for group in _CITE.findall(r.text) for c in re.split(r"\s*,\s*", group)}
 
     def score(item: Item) -> tuple[int, int]:
@@ -541,7 +650,7 @@ def most_relevant_comment(pack: EvidencePack, question: str, removed: list[Remov
 
 def most_relevant_sentence(text: str, wanted: set[str]) -> str:
     """The sentence of ``text`` sharing the most words with ``wanted`` (first wins ties); whole text if unsplittable."""
-    sentences = split_sentences(text)
+    sentences = [ln.strip() for ln in text.splitlines() if ln.strip()] if "\n" in text else split_sentences(text)
     if len(sentences) <= 1:
         return text.strip()
     return max(sentences, key=lambda sent: len(wanted & _tokens(sent)))

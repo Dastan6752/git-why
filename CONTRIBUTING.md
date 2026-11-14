@@ -36,8 +36,8 @@ python -m build && twine check --strict dist/*
 | `git_why/refs.py` | Issue / PR / ticket references in commit messages |
 | `git_why/github.py` | Read-only GitHub client (stdlib `urllib`, injectable transport) |
 | `git_why/report.py` | The assembled report: evidence vs. inference, confidence, JSON schema |
-| `git_why/evidence.py` | `--ask`: numbers the report's facts into a citable evidence pack (pure) |
-| `git_why/ask.py` | `--ask`: local Ollama client (loopback only), model selection, citation validator |
+| `git_why/evidence.py` | `--ask`: numbers the report's facts (and, for code questions, the source at HEAD) into a citable evidence pack (pure) |
+| `git_why/ask.py` | `--ask`: question-type detection, local Ollama client (loopback only), model selection, quote/citation validator |
 | `git_why/render.py` | rich / plain / JSON output |
 | `git_why/core.py` | The pipeline; `cli.py` is a thin typer wrapper around it |
 

@@ -5,7 +5,8 @@ Every citable item gets a stable ID the model must quote:
 
 * ``C1, C2, …`` commits (oldest first, noise excluded),
 * ``P1, …`` pull requests and ``I1, …`` issues fetched with ``--github``,
-* ``R1, …`` review / issue comments on those threads.
+* ``R1, …`` review / issue comments on those threads,
+* ``S1, S2`` the source code at HEAD: the target line(s) and the enclosing block.
 
 The pack is the *only* thing the model sees. It is built from fields that are
 already in the JSON report, so an answer can always be traced back to the
@@ -22,6 +23,9 @@ from .history import Step
 from .report import Report
 
 DEFAULT_BUDGET = 6_000  # characters of evidence text handed to the model
+MAX_CODE_CHARS = 1_500  # the enclosing block shown for code questions
+MODE_HISTORY = "history"  # why / when / who: commits, PRs and comments first, then the line itself
+MODE_CODE = "code"  # what / how: the source at HEAD first, then the commits
 MAX_BODY_CHARS = 400  # per commit message / thread description
 MAX_COMMENT_CHARS = 300
 
@@ -29,7 +33,7 @@ MAX_COMMENT_CHARS = 300
 @dataclass
 class Item:
     id: str  # "C1", "P1", "I1", "R1"
-    kind: str  # "commit" | "pr" | "issue" | "comment"
+    kind: str  # "commit" | "pr" | "issue" | "comment" | "code"
     label: str  # short human label for the Sources list
     text: str  # what the model reads
     url: str | None = None
@@ -66,9 +70,17 @@ class EvidencePack:
 # ---------------------------------------------------------------------------
 
 
-def build(report: Report, *, budget: int = DEFAULT_BUDGET) -> EvidencePack:
-    """Number the report's facts. Commits first (they are the backbone), then threads, then comments."""
+def build(report: Report, *, budget: int = DEFAULT_BUDGET, mode: str = MODE_HISTORY) -> EvidencePack:
+    """
+    Number the report's facts.
+
+    ``history`` mode: commits first (they are the backbone), then threads, then
+    comments, then the target line ``S1`` so a "what" clause can still be grounded.
+    ``code`` mode: ``S1`` (target line) and ``S2`` (enclosing block) first, then the
+    same history items.
+    """
     pack = EvidencePack(target=report.target.label, line=report.target.lines[0] if report.target.lines else "")
+    code_items = _code_items(report, with_block=mode == MODE_CODE)
 
     commits = [s for s in reversed(report.steps) if not s.is_noise]  # oldest first
     if not commits:
@@ -101,8 +113,11 @@ def build(report: Report, *, budget: int = DEFAULT_BUDGET) -> EvidencePack:
                 )
             )
 
+    ordered = code_items + items + thread_items + comment_items
+    if mode != MODE_CODE:
+        ordered = items + thread_items + comment_items + code_items
     used = 0
-    for candidate in items + thread_items + comment_items:
+    for candidate in ordered:
         if used + len(candidate.text) > budget and pack.items:
             pack.omitted += 1
             continue
@@ -165,6 +180,56 @@ def _commit_item(report: Report, step: Step, item_id: str) -> Item:
         text=" ".join(parts),
         url=report.commit_url(step.sha),
     )
+
+
+def _code_items(report: Report, *, with_block: bool) -> list[Item]:
+    """``S1``: the target line(s) exactly as at HEAD. ``S2``: the enclosing block (code questions only)."""
+    t = report.target
+    if t.text is not None or not t.lines:
+        return []  # --text targets have no HEAD position
+    head = report.repo.head
+    blob = f"{report.web_base}/blob/{head}/{t.file}" if report.web_base and head else None
+    span = f"{t.start}" if t.start == t.end else f"{t.start}-{t.end}"
+    anchor = f"#L{t.start}" if t.start == t.end else f"#L{t.start}-L{t.end}"
+    code = "\n".join(t.lines)
+    items = [
+        Item(
+            id="S1",
+            kind="code",
+            label=f"{t.file}:{span} (HEAD)",
+            text=f"source code, {t.file} line {span} at HEAD:\n{code}",
+            url=f"{blob}{anchor}" if blob else None,
+            quote=code,
+        )
+    ]
+    if with_block and t.context and (t.context_start, t.context_end) != (t.start, t.end):
+        block = _clip_lines("\n".join(t.context), MAX_CODE_CHARS)
+        items.append(
+            Item(
+                id="S2",
+                kind="code",
+                label=f"{t.file} lines {t.context_start}-{t.context_end} (HEAD)",
+                text=f"source code, {t.file} lines {t.context_start}-{t.context_end} at HEAD (enclosing block):\n"
+                + block,
+                url=f"{blob}#L{t.context_start}-L{t.context_end}" if blob else None,
+                quote=block,
+            )
+        )
+    return items
+
+
+def _clip_lines(text: str, limit: int) -> str:
+    """Clip at a line boundary (code must stay quotable line by line)."""
+    if len(text) <= limit:
+        return text
+    kept: list[str] = []
+    used = 0
+    for line in text.splitlines():
+        if used + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept) + "\n…"
 
 
 def _thread_item(thread: Thread, item_id: str) -> Item:

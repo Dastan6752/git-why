@@ -14,7 +14,7 @@ from typing import IO, Any
 from rich.console import Console
 from rich.markup import escape
 
-from .ask import NO_DECISION, Answer
+from .ask import MODE_LABEL, Answer, closing_line
 from .history import Step
 from .report import Report
 
@@ -304,16 +304,18 @@ def _plain_answer(answer: Answer, w: Callable[[str], Any], show_removed: bool = 
     w("\n")
     w(f"Question: {answer.question}\n")
     w(_answer_headline(answer) + "\n")
+    w(f"  question type: {MODE_LABEL.get(answer.mode, answer.mode)}\n")
     if answer.note:
         w(f"  note: {answer.note}\n")
     if answer.message:
         w(f"  {answer.message}\n")
     if answer.fallback:
         fb = answer.fallback
-        w(f"  Most relevant comment in the evidence (exact quote) [{fb.item.id}]:\n")
+        kind = "code" if fb.item.kind == "code" else "comment"
+        w(f"  Most relevant {kind} in the evidence (exact quote) [{fb.item.id}]:\n")
         w(f'    "{fb.quote}"\n')
         w(f"    - {fb.item.label}" + (f"  {fb.item.url}" if fb.item.url else "") + "\n")
-        w(f"  {NO_DECISION}\n")
+        w(f"  {closing_line(answer.mode)}\n")
     for s in answer.sentences:
         cite = f" [{', '.join(s.citations)}]" if s.citations else ""
         w(f"  {s.text}{cite}\n")
@@ -337,17 +339,19 @@ def _rich_answer(answer: Answer, p, show_removed: bool = False) -> None:  # type
     p(f"  [bold]Question:[/bold] {escape(answer.question)}")
     colour = {"answered": "green", "insufficient_evidence": "yellow"}.get(answer.status, "yellow")
     p(f"  [bold {colour}]{escape(_answer_headline(answer))}[/bold {colour}]")
+    p(f"    [dim]question type: {MODE_LABEL.get(answer.mode, answer.mode)}[/dim]")
     if answer.note:
         p(f"    [dim]note: {escape(answer.note)}[/dim]")
     if answer.message:
         p(f"    {escape(answer.message)}")
     if answer.fallback:
         fb = answer.fallback
-        p(f"    Most relevant comment in the evidence (exact quote) [magenta]\\[{fb.item.id}][/magenta]:")
+        kind = "code" if fb.item.kind == "code" else "comment"
+        p(f"    Most relevant {kind} in the evidence (exact quote) [magenta]\\[{fb.item.id}][/magenta]:")
         p(f'      [italic]"{escape(fb.quote)}"[/italic]')
         url = f"  [dim]{escape(fb.item.url)}[/dim]" if fb.item.url else ""
         p(f"      - {escape(fb.item.label)}{url}")
-        p(f"    [bold]{NO_DECISION}[/bold]")
+        p(f"    [bold]{closing_line(answer.mode)}[/bold]")
     for s in answer.sentences:
         cite = f" [magenta]\\[{', '.join(s.citations)}][/magenta]" if s.citations else ""
         p(f"    {escape(s.text)}{cite}")

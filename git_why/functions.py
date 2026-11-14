@@ -137,7 +137,8 @@ def function_extent(content: str, header_line: int) -> tuple[int, int]:
     # 2. brace style? look at the signature's last line and the next non-blank line
     brace_start = None
     for j in range(sig_end, min(last, sig_end + 2) + 1):
-        if "{" in lines[j]:
+        # an opening brace that ends the line (not one inside an f-string or dict literal)
+        if lines[j].split("//")[0].rstrip().endswith("{") or lines[j].strip() == "{":
             brace_start = j
             break
         if lines[j].strip() and j != sig_end:
@@ -160,3 +161,47 @@ def function_extent(content: str, header_line: int) -> tuple[int, int]:
             break
         end = j
     return header_line, end + 1
+
+
+# Header-ish lines that open a block in common languages (used only to pick code context for --ask).
+_BLOCK_HEADER = re.compile(
+    r"^\s*(?:@?[\w.]+\s+)*(?:async\s+)?(?:def|fn|func|function|sub|proc|class|struct|enum|trait|impl|interface|"
+    r"object|module|type)\b|^\s*(?:const|let|var)?\s*[\w.]+\s*[:=]\s*(?:async\s+)?(?:function\b|\(.*\)\s*=>)"
+    r"|^[^\s#/].*\{\s*$"
+)
+
+MAX_CONTEXT_LINES = 40
+CONTEXT_WINDOW = 10
+
+
+def enclosing_block(content: str, start: int, end: int) -> tuple[int, list[str]]:
+    """
+    Best-effort source context for lines ``start``-``end`` (1-based): the innermost
+    enclosing function/class block when one can be found, otherwise a window of
+    ``CONTEXT_WINDOW`` lines around the target. Always includes the target, never more
+    than ``MAX_CONTEXT_LINES`` lines. Returns ``(first_line_number, lines)``.
+    """
+    lines = content.splitlines()
+    if not lines or start < 1 or end > len(lines) or start > end:
+        return 0, []
+    first = start - 1
+    indent = min(
+        (len(ln) - len(ln.lstrip()) for ln in lines[first:end] if ln.strip()),
+        default=0,
+    )
+    for j in range(first, -1, -1):
+        line = lines[j]
+        if not line.strip():
+            continue
+        line_indent = len(line) - len(line.lstrip())
+        if j < first and line_indent < indent and _BLOCK_HEADER.match(line):
+            b_start, b_end = function_extent(content, j + 1)
+            b_end = max(b_end, end)
+            if b_end - b_start + 1 <= MAX_CONTEXT_LINES:
+                return b_start, lines[b_start - 1 : b_end]
+            break  # the block is too large: fall back to a window
+        if j < first and line_indent < indent and not _BLOCK_HEADER.match(line) and line_indent == 0:
+            break  # reached top-level code that is not a header
+    w_start = max(1, start - CONTEXT_WINDOW)
+    w_end = min(len(lines), end + CONTEXT_WINDOW)
+    return w_start, lines[w_start - 1 : w_end]

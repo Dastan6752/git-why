@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -64,7 +65,7 @@ def test_evidence_pack_numbers_commits_threads_and_comments(tmp_path: Path) -> N
     ids = [i.id for i in pack.items]
     # commits oldest first, noise ("style: fmt") excluded; threads in the order commits cite them
     # (the origin says "Fixes #42", the later change cites PR #99); one review comment on the PR
-    assert ids == ["C1", "C2", "C3", "C4", "C5", "I1", "P1", "R1"]
+    assert ids == ["C1", "C2", "C3", "C4", "C5", "I1", "P1", "R1", "S1"]  # the line itself comes last
     assert pack.get("C1") is not None and "created here" in pack.get("C1").text  # type: ignore[union-attr]
     assert "Fixes #42" in pack.get("C1").text  # type: ignore[union-attr]
     p1 = pack.get("P1")
@@ -89,7 +90,7 @@ def test_evidence_pack_caveats_without_github(blind_spot_repo: Path) -> None:
     report = investigate(blind_spot_repo / "cfg.py", 2, 2, Options())
     pack = build(report)
     assert any("--github" in c for c in pack.caveats)
-    assert [i.kind for i in pack.items] == ["commit"] * len(pack.items)
+    assert [i.kind for i in pack.items] == ["commit"] * (len(pack.items) - 1) + ["code"]
     assert any("invisible to git blame" in i.text for i in pack.items)
 
 
@@ -296,7 +297,7 @@ def _ask_with_pack(raw: str, monkeypatch: pytest.MonkeyPatch, question: str = "W
     """Run the full ask() pipeline (FakeOllama -> validate -> fallback) against the requests evidence pack."""
     import git_why.ask as ask_mod
 
-    monkeypatch.setattr(ask_mod, "build", lambda report, budget: _retries_pack())
+    monkeypatch.setattr(ask_mod, "build", lambda report, budget, mode: _retries_pack())
     fake = FakeOllama(models=["llama3.2"], reply=raw)
     report = SimpleNamespace(target=SimpleNamespace(label="src/requests/adapters.py:81"))
     return ask(cast(Any, report), question, model="llama3.2", client=fake.client())
@@ -309,7 +310,8 @@ def test_regression_llama32_observed_output_rendered(monkeypatch: pytest.MonkeyP
     buf = io.StringIO()
     render_plain(sample_report(tmp_path), out=buf, answer=answer)
     out = buf.getvalue()[buf.getvalue().index("Question:") :]
-    assert out.splitlines()[2:4] == [
+    assert out.splitlines()[2] == "  question type: history"
+    assert out.splitlines()[3:5] == [
         f"  {HONEST_LINE}",
         "  Not in the evidence: why the final value was set back to 0.",
     ]
@@ -335,8 +337,9 @@ def test_regression_llama32_when_only_the_false_reason_is_produced(
     buf = io.StringIO()
     render_plain(sample_report(tmp_path), out=buf, answer=answer)
     out = buf.getvalue()[buf.getvalue().index("Question:") :]
-    assert out.splitlines()[1:7] == [
+    assert out.splitlines()[1:8] == [
         "AI answer (model llama3.2): the gathered evidence does not answer this question",
+        "  question type: history",
         "  Most relevant comment in the evidence (exact quote) [R2]:",
         '    "I realize that using `0` will make it a magic number in this case."',
         "    - @sigmavirus24 (review comment) on PR #2216  https://example.invalid/pull/2216#r2",
@@ -776,3 +779,354 @@ def test_cli_without_ask_is_unchanged(blind_spot_repo: Path, monkeypatch: pytest
     fake = FakeOllama(models=None)
     code, out, _ = _cli(blind_spot_repo, "cfg.py:2", "--format", "plain", fake=fake, monkeypatch=monkeypatch)
     assert code == 0 and "AI answer" not in out and "Question:" not in out and fake.calls == []
+
+
+# ---------------------------------------------------------------------------
+# question types: code explanation vs. historical reason (end to end)
+# ---------------------------------------------------------------------------
+
+HELPER_FILE = '''import sys
+
+
+def fail(message, code=1):
+    """Print an error and stop."""
+    print(f"error: {message}", file=sys.stderr)
+    sys.exit(code)
+'''
+
+
+def _last_prompt(fake: FakeOllama) -> str:
+    payload = fake.calls[-1][1]
+    assert payload is not None
+    return str(payload["messages"][-1]["content"])
+
+
+def _system_prompt(fake: FakeOllama) -> str:
+    payload = fake.calls[-1][1]
+    assert payload is not None
+    return str(payload["messages"][0]["content"])
+
+
+@pytest.fixture
+def helper_repo(make_repo: Callable[[str], Path]) -> Path:
+    from tests.conftest import write_commit
+
+    repo = make_repo("helper")
+    write_commit(repo, "app.py", HELPER_FILE, "add fail helper")
+    return repo
+
+
+def test_e2e_code_question_is_answered_from_the_source_code(helper_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """'What does this line do?' must be grounded in the code at HEAD, not in a commit title."""
+    fake = FakeOllama(
+        models=["m"],
+        reply=(
+            'The line calls `print(f"error: {message}", file=sys.stderr)`, which writes to stderr [S1]. '
+            'It belongs to the helper "def fail(message, code=1)" which then calls `sys.exit(code)` [S2]. '
+            "The `file=sys.stderr` argument was added later by a reviewer [S1]. "
+            "Not in the evidence: where fail() is called from."
+        ),
+    )
+    code, out, _ = _cli(
+        helper_repo,
+        "app.py:6",
+        "--ask",
+        "What does this line do?",
+        "--model",
+        "m",
+        "--format",
+        "plain",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    tail = out[out.index("Question: What does this line do?") :]
+    assert "question type: code explanation" in tail
+    # grounded sentences survive, each cited to source code
+    assert 'The line calls `print(f"error: {message}", file=sys.stderr)`, which writes to stderr. [S1]' in tail
+    assert "which then calls `sys.exit(code)`. [S2]" in tail
+    assert "  Not in the evidence: where fail() is called from." in tail
+    # a historical claim cited to source code is rejected (and not silently), even though its quote is real
+    assert "added later by a reviewer" not in tail.split("Removed")[0]
+    assert "Removed 1 generated sentence the evidence does not support" in tail
+    code2, out2, _ = _cli(
+        helper_repo,
+        "app.py:6",
+        "--ask",
+        "What does this line do?",
+        "--model",
+        "m",
+        "--format",
+        "plain",
+        "--show-removed",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    assert "reason: historical claim cited to source code, not to a commit or discussion" in out2
+    # sources point at the code at HEAD
+    assert "[S1] app.py:6 (HEAD)" in tail and "[S2] app.py lines 4-7 (HEAD)" in tail
+    # the model saw the code and the commit, in that order
+    prompt = _last_prompt(fake)
+    assert prompt.index("[S1]") < prompt.index("[S2]") < prompt.index("[C1]")
+    assert 'print(f"error: {message}", file=sys.stderr)' in prompt
+    assert _system_prompt(fake).startswith("You explain what a line of code does")
+
+
+def test_e2e_history_question_keeps_the_current_behaviour(
+    blind_spot_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'Why ...' questions keep commits/PRs/comments as the primary evidence and all existing rules."""
+    fake = FakeOllama(
+        models=["m"],
+        reply=(
+            'It went back to 0 in the commit "C: revert to 0, sentinel broke docs" [C3]. '
+            'The line currently reads "RETRIES = 0" [S1]. '
+            "The sentinel was chosen to avoid a magic number [C2]. "
+            "Not in the evidence: why 0 rather than another number."
+        ),
+    )
+    code, out, _ = _cli(
+        blind_spot_repo,
+        "cfg.py:2",
+        "--ask",
+        "Why is RETRIES 0?",
+        "--model",
+        "m",
+        "--format",
+        "plain",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    tail = out[out.index("Question: Why is RETRIES 0?") :]
+    assert "question type: history" in tail
+    assert 'It went back to 0 in the commit "C: revert to 0, sentinel broke docs". [C3]' in tail
+    assert 'The line currently reads "RETRIES = 0". [S1]' in tail
+    assert "  Not in the evidence: why 0 rather than another number." in tail
+    assert "chosen to avoid" not in tail.split("Removed")[0]
+    assert "Removed 1 generated sentence the evidence does not support" in tail
+    prompt = _last_prompt(fake)
+    assert prompt.index("[C1]") < prompt.index("[C3]") < prompt.index("[S1]")  # history first, code last
+    assert "[S2]" not in prompt  # no enclosing block for history questions
+    assert _system_prompt(fake).startswith("You answer one question about a single line")
+
+
+@pytest.mark.parametrize(
+    ("question", "mode"),
+    [
+        ("What does this line do?", "code"),
+        ("what does this do", "code"),
+        ("How does this work?", "code"),
+        ("Explain this line.", "code"),
+        ("What is err=True for?", "code"),
+        ("What does this return?", "code"),
+        ("Why is this timeout set to 30?", "history"),
+        ("Why was this line added?", "history"),
+        ("When did this change?", "history"),
+        ("Who wrote this?", "history"),
+        ("What is the purpose of this line?", "history"),  # purpose = intent -> history evidence first
+        ("What changed here?", "history"),
+        ("Was this ever different?", "history"),
+        ("Which PR introduced this?", "history"),
+        ("Is there a reason for 0?", "history"),
+        ("What did this look like before?", "history"),
+    ],
+)
+def test_classify_question(question: str, mode: str) -> None:
+    from git_why.ask import classify_question
+
+    assert classify_question(question) == mode
+
+
+def test_code_mode_pack_puts_source_first_and_history_mode_puts_it_last(
+    helper_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = investigate(helper_repo / "app.py", 6, 6, Options())
+    code_pack = build(report, mode="code")
+    assert [i.id for i in code_pack.items] == ["S1", "S2", "C1"]
+    s1, s2 = code_pack.get("S1"), code_pack.get("S2")
+    assert s1 is not None and s2 is not None
+    assert s1.kind == s2.kind == "code"
+    assert s1.quote == '    print(f"error: {message}", file=sys.stderr)' and s1.label == "app.py:6 (HEAD)"
+    assert s2.quote.splitlines()[0] == "def fail(message, code=1):" and s2.label == "app.py lines 4-7 (HEAD)"
+    assert s1.url is None and s2.url is None  # no web remote in the fixture repo
+    history_pack = build(report, mode="history")
+    assert [i.id for i in history_pack.items] == ["C1", "S1"]
+    assert "S2" not in history_pack.ids
+    # the prompt shows the code verbatim, line by line
+    text = format_for_prompt(code_pack)
+    assert '[S1] source code, app.py line 6 at HEAD:\n    print(f"error: {message}", file=sys.stderr)' in text
+
+
+def test_code_items_link_to_the_blob_when_the_remote_is_known(tmp_path: Path) -> None:
+    report = sample_report(tmp_path)
+    report.target.context_start, report.target.context = 1, ["def f():", "    sleep(0.4)", "    return 1"]
+    report.target.start = report.target.end = 2
+    pack = build(report, mode="code")
+    s1, s2 = pack.get("S1"), pack.get("S2")
+    assert s1 is not None and s2 is not None
+    assert s1.url == f"https://github.com/o/r/blob/{report.repo.head}/f.py#L2"
+    assert s2.url == f"https://github.com/o/r/blob/{report.repo.head}/f.py#L1-L3"
+
+
+def test_code_items_skipped_for_text_targets(tmp_path: Path) -> None:
+    report = sample_report(tmp_path)
+    report.target.text = "sleep(0.4)"
+    assert all(i.kind != "code" for i in build(report, mode="code").items)
+
+
+def test_enclosing_block_is_dropped_when_it_equals_the_target(tmp_path: Path) -> None:
+    report = sample_report(tmp_path)
+    report.target.context_start, report.target.context = report.target.start, list(report.target.lines)
+    assert "S2" not in build(report, mode="code").ids
+
+
+def test_enclosing_block_is_clipped_at_a_line_boundary(tmp_path: Path) -> None:
+    from git_why import evidence
+
+    report = sample_report(tmp_path)
+    report.target.context_start = 1
+    report.target.context = [f"line {n} " + "x" * 60 for n in range(1, 41)]
+    pack = build(report, mode="code")
+    s2 = pack.get("S2")
+    assert s2 is not None and len(s2.quote) <= evidence.MAX_CODE_CHARS + 2 and s2.quote.endswith("\n…")
+    assert all(ln == "…" or ln.startswith("line ") for ln in s2.quote.splitlines())
+
+
+def test_enclosing_block_heuristics() -> None:
+    from git_why.functions import enclosing_block
+
+    py = "import os\n\n\nclass A:\n    def m(self):\n        x = 1\n        return x\n\n\ndef g():\n    pass\n"
+    assert enclosing_block(py, 6, 6) == (5, ["    def m(self):", "        x = 1", "        return x"])
+    assert enclosing_block(py, 1, 1)[0] == 1  # top-level: a window, starting at the file start
+    js = "const x = 1;\n\nfunction fail(msg) {\n  console.error(msg);\n  process.exit(1);\n}\n"
+    assert enclosing_block(js, 4, 4) == (
+        3,
+        ["function fail(msg) {", "  console.error(msg);", "  process.exit(1);", "}"],
+    )
+    assert enclosing_block("", 1, 1) == (0, [])
+    assert enclosing_block("a\n", 2, 2) == (0, [])  # out of range
+    big = "def huge():\n" + "".join(f"    x{n} = {n}\n" for n in range(100))
+    start, lines = enclosing_block(big, 50, 50)
+    assert len(lines) == 21 and start == 40 and "    x48 = 48" in lines  # too big -> +-10 window
+
+
+def test_function_extent_ignores_braces_inside_fstrings() -> None:
+    from git_why.functions import function_extent
+
+    src = 'def _fail(message):\n    print(f"error: {message}")\n    raise SystemExit(1)\n\n\ndef other():\n    pass\n'
+    assert function_extent(src, 1) == (1, 3)
+
+
+def test_backtick_quotes_and_whole_line_code_quotes_count() -> None:
+    from git_why.ask import quotes_in
+    from git_why.evidence import Item
+
+    s1 = Item(
+        "S1", "code", "f.py:2 (HEAD)", "source code, f.py line 2 at HEAD:\n    RETRIES = 0", quote="    RETRIES = 0"
+    )
+    assert quotes_in("the line is `RETRIES = 0` here", [s1]) == ["RETRIES = 0"]  # whole code line, 2 words
+    assert quotes_in('the line is "RETRIES = 0" here', [s1]) == ["RETRIES = 0"]
+    assert quotes_in("the line is `RETRIES = 0` here", []) == []  # not a whole line of a cited code item
+    assert quotes_in("it calls `sys.exit(code)` now", []) == ["sys.exit(code)"]  # three tokens after normalising
+    assert quotes_in("a `0` and `x` here", []) == []
+    # a stray pair of backticks around prose is not a quote span
+    assert quotes_in("use `0` will make it a magic `value`", []) == []
+
+
+def test_validate_rejects_history_claims_cited_only_to_code(helper_repo: Path) -> None:
+    from git_why.ask import HISTORY_FROM_CODE
+
+    report = investigate(helper_repo / "app.py", 6, 6, Options())
+    pack = build(report, mode="code")
+    for raw in [
+        "The `file=sys.stderr` argument was added by a reviewer [S1].",
+        "`sys.exit(code)` was introduced in 2021 [S2].",
+        'The author wrote `print(f"error: {message}", file=sys.stderr)` to fix issue #12 [S1].',
+        "Originally `sys.exit(code)` did not exist [S2].",
+    ]:
+        kept, removed = validate(raw, pack)
+        assert kept == [] and removed[0].reason == HISTORY_FROM_CODE, raw
+    # the same claim cited to the commit that actually says so passes the history checks
+    kept, removed = validate('The line was created in the commit "add fail helper" [C1].', pack)
+    assert removed == [] and kept[0].citations == ["C1"]
+    # describing behaviour from the code is fine
+    kept, removed = validate("It ends with `sys.exit(code)`, which stops the process [S2].", pack)
+    assert removed == [] and kept[0].citations == ["S2"]
+
+
+def test_reason_rule_still_applies_when_code_and_history_are_cited_together(helper_repo: Path) -> None:
+    from git_why.ask import REASON_NOT_IN_SOURCE
+
+    report = investigate(helper_repo / "app.py", 6, 6, Options())
+    pack = build(report, mode="code")
+    raw = 'The reason for `file=sys.stderr` is the commit "add fail helper" [S1][C1].'
+    kept, removed = validate(raw, pack)
+    assert kept == [] and removed[0].reason == REASON_NOT_IN_SOURCE
+
+
+def test_code_mode_fallback_quotes_the_line_itself(helper_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeOllama(models=["m"], reply="It prints something, probably an error. Trust me.")
+    code, out, _ = _cli(
+        helper_repo,
+        "app.py:6",
+        "--ask",
+        "What does this line do?",
+        "--model",
+        "m",
+        "--format",
+        "plain",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    tail = out[out.index("Question:") :]
+    assert "  Most relevant code in the evidence (exact quote) [S1]:" in tail
+    assert '    "print(f"error: {message}", file=sys.stderr)"' in tail
+    assert "  The evidence shows the code, but the model produced no verified explanation of it." in tail
+    assert "The evidence does not explain the final decision." not in tail
+    assert "Removed 2 generated sentences" in tail
+
+
+def test_json_report_schema_is_unchanged_and_ask_block_carries_mode(
+    helper_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeOllama(models=["m"], reply="It calls `sys.exit(code)` at the end [S2].")
+    code, out, _ = _cli(
+        helper_repo,
+        "app.py:6",
+        "--ask",
+        "How does this work?",
+        "--model",
+        "m",
+        "--json",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    data = json.loads(out)
+    assert data["schema_version"] == 1
+    assert set(data["target"]) == {"file", "start", "end", "function", "text", "lines"}  # no new report keys
+    assert data["ask"]["mode"] == "code"
+    assert [i["id"] for i in data["ask"]["evidence"]["items"]] == ["S1", "S2", "C1"]
+    assert data["ask"]["sentences"][0]["citations"] == ["S2"]
+    assert data["ask"]["evidence"]["items"][0]["kind"] == "code"
+
+
+def test_rich_render_shows_question_type_and_code_source(helper_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeOllama(models=["m"], reply="It calls `sys.exit(code)` at the end [S2].")
+    code, out, _ = _cli(
+        helper_repo,
+        "app.py:6",
+        "--ask",
+        "How does this work?",
+        "--model",
+        "m",
+        "--format",
+        "rich",
+        "--no-color",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    assert "question type: code explanation" in out and "[S2] app.py lines 4-7 (HEAD)" in out

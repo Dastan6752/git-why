@@ -235,9 +235,22 @@ git why src/app.py:42 --ask "Why is this timeout set to 30?"
 unchanged). The answer is written by a model running **on your machine** via
 [Ollama](https://ollama.com), from the evidence in the report and nothing else:
 
-- The model sees a numbered *evidence pack* built from the report — commits
-  `[C1]…`, pull requests `[P1]…`, issues `[I1]…`, review comments `[R1]…` — and
-  every factual sentence must **quote the source verbatim** and cite its ID.
+- `--ask` answers **two kinds of question**, and tells you which one it
+  detected (`question type: …` under the headline):
+  - **history** — *why / when / who / what changed* (`Why is this 30?`,
+    `Which PR introduced this?`, `What is the purpose of this line?`). The
+    evidence is commits `[C1]…`, pull requests `[P1]…`, issues `[I1]…`, review
+    comments `[R1]…`, plus the current line `[S1]` last.
+  - **code explanation** — everything else (`What does this line do?`,
+    `How does this work?`, `Explain this`). The evidence starts with the
+    **source code at HEAD**: `[S1]` the line itself and `[S2]` its enclosing
+    function or block (at most 40 lines), followed by the same commits. The
+    model is told to describe only behaviour it can read in the quoted code and
+    never to say when, why or by whom it was written unless it quotes a commit
+    or discussion that says so.
+- In both modes every factual sentence must **quote the source verbatim** and
+  cite its ID. Code may be quoted in backticks (`` `sys.exit(code)` ``); a whole
+  line of cited code counts as a quote even when it is short.
 - Two mechanical checks run on every sentence: the cited IDs must exist, and
   each quoted phrase (3+ words) must actually occur in the cited source. A
   sentence that fails is **removed**; the normal output tells you how many were
@@ -253,6 +266,11 @@ unchanged). The answer is written by a model running **on your machine** via
   a value "will make it a magic number" can be reported as what the reviewer
   said, but never as the reason the value was chosen — the sentence is removed
   with `states a reason, but the quoted source only raises a concern…`.
+- A sentence that cites **only source code** (`[S1]`/`[S2]`) may describe
+  behaviour, but any historical claim in it — *was added*, *reviewer*, *commit*,
+  *in 2014*, *issue #12* — is removed with `historical claim cited to source
+  code, not to a commit or discussion`. Code shows what a line does, never why
+  it was written.
 - A reason claim and `Not in the evidence:` cannot both stand for the same
   question: if the model writes both, the reason claim is removed and the
   cautious sentence is kept. If the evidence does not state why the current
@@ -270,7 +288,10 @@ unchanged). The answer is written by a model running **on your machine** via
   sources".
 
 MVP limits: a single `FILE:LINE` target (ranges, `--function`, `--text` come
-later); add `--github` to include PR discussion as evidence.
+later); add `--github` to include PR discussion as evidence. The question type
+is detected from the wording (any *why/when/who/changed/PR/purpose…* word means
+history); if it guesses wrong, rephrase — e.g. "What does this do?" for code,
+"Why is this here?" for history.
 
 ### Setup (once)
 
@@ -342,7 +363,25 @@ AI answer (model llama3.2): the gathered evidence does not answer this question
   Removed 1 generated sentence the evidence does not support (--show-removed or --json lists them).
 ```
 
-In JSON output the same information is under `"ask"` (`status`, `model`,
+A code-explanation question, run on this repository's own `git_why/cli.py:81`
+with a **scripted model reply** (again produced by the test suite, not a real
+model): the two sentences grounded in the code survive, a sentence claiming why
+the helper "was added" is removed because nothing in the evidence says so.
+
+```
+Question: What does this line do?
+AI answer (model example-model via local Ollama at http://127.0.0.1:11434; generated text - check the sources)
+  question type: code explanation
+  The line calls `typer.secho(f"error: {message}", fg="red", err=True)`, which prints the message in red to stderr. [S1]
+  It is the first statement of `def _fail(message: str, code: int, hint: str | None = None) -> None:` and the function ends with `raise typer.Exit(code)`. [S2]
+  Not in the evidence: which commands call _fail.
+  Sources
+    [S1] git_why/cli.py:81 (HEAD)
+    [S2] git_why/cli.py lines 80-84 (HEAD)
+  Removed 1 generated sentence the evidence does not support (--show-removed or --json lists them).
+```
+
+In JSON output the same information is under `"ask"` (`mode`, `status`, `model`,
 `sentences` with `citations`, `sources`, `removed` with reasons, `fallback`,
 `setup`, the `evidence` pack and the `raw` model text).
 
