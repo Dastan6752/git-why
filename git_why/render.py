@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import IO
+from collections.abc import Callable
+from typing import IO, Any
 
 from rich.console import Console
 from rich.markup import escape
 
+from .ask import Answer
 from .history import Step
 from .report import Report
 
@@ -42,9 +44,12 @@ def _noun(report: Report) -> str:
 # ---------------------------------------------------------------------------
 
 
-def render_json(report: Report, out: IO[str] | None = None) -> None:
+def render_json(report: Report, out: IO[str] | None = None, *, answer: Answer | None = None) -> None:
     out = out or sys.stdout
-    json.dump(report.to_dict(), out, indent=2, ensure_ascii=True)
+    data = report.to_dict()
+    if answer is not None:
+        data["ask"] = answer.to_dict()
+    json.dump(data, out, indent=2, ensure_ascii=True)
     out.write("\n")
 
 
@@ -53,7 +58,14 @@ def render_json(report: Report, out: IO[str] | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def render_rich(report: Report, *, color: bool | None = None, max_body: int = 6, out: IO[str] | None = None) -> None:
+def render_rich(
+    report: Report,
+    *,
+    color: bool | None = None,
+    max_body: int = 6,
+    out: IO[str] | None = None,
+    answer: Answer | None = None,
+) -> None:
     out = out or sys.stdout
     console = Console(
         file=out, force_terminal=color if color is not None else None, no_color=color is False, soft_wrap=True
@@ -90,6 +102,8 @@ def render_rich(report: Report, *, color: bool | None = None, max_body: int = 6,
         p(f"    [dim]- {escape(reason)}[/dim]")
     for w in report.warnings + report.github.warnings:
         p(f"  [yellow]warning:[/yellow] {escape(w)}")
+    if answer is not None:
+        _rich_answer(answer, p)
     p()
 
 
@@ -179,7 +193,9 @@ def _rich_thread(thread, p) -> None:  # type: ignore[no-untyped-def]
 # ---------------------------------------------------------------------------
 
 
-def render_plain(report: Report, *, max_body: int = 6, out: IO[str] | None = None) -> None:
+def render_plain(
+    report: Report, *, max_body: int = 6, out: IO[str] | None = None, answer: Answer | None = None
+) -> None:
     out = out or sys.stdout
     w = out.write
     w(f"{report.target.label}\n")
@@ -249,3 +265,75 @@ def render_plain(report: Report, *, max_body: int = 6, out: IO[str] | None = Non
         w(f"  - {reason}\n")
     for warning in report.warnings + report.github.warnings:
         w(f"warning: {warning}\n")
+    if answer is not None:
+        _plain_answer(answer, w)
+
+
+# ---------------------------------------------------------------------------
+# --ask section (always last, always the same shape)
+# ---------------------------------------------------------------------------
+
+
+def _answer_headline(answer: Answer) -> str:
+    if answer.status == "answered":
+        return f"AI answer (model {answer.model} via local Ollama at {answer.host}; generated text - check the sources)"
+    if answer.status == "insufficient_evidence":
+        return f"AI answer (model {answer.model}): the gathered evidence does not answer this question"
+    if answer.status == "no_model_selected":
+        return "AI answer: no model selected"
+    return "AI answer: unavailable"
+
+
+def _plain_answer(answer: Answer, w: Callable[[str], Any]) -> None:
+    w("\n")
+    w(f"Question: {answer.question}\n")
+    w(_answer_headline(answer) + "\n")
+    if answer.note:
+        w(f"  note: {answer.note}\n")
+    if answer.message:
+        w(f"  {answer.message}\n")
+    for s in answer.sentences:
+        cite = f" [{', '.join(s.citations)}]" if s.citations else ""
+        w(f"  {s.text}{cite}\n")
+    if answer.sources:
+        w("  Sources\n")
+        for item in answer.sources:
+            w(f"    [{item.id}] {item.label}" + (f"  {item.url}" if item.url else "") + "\n")
+    if answer.removed:
+        n = len(answer.removed)
+        w(f"  Removed {n} sentence{'s' if n != 1 else ''} that had no valid citation (not shown as fact):\n")
+        for r in answer.removed:
+            w(f"    - {r}\n")
+    if answer.setup:
+        w("  The Git evidence above is complete without AI. To get answers:\n")
+        for step in answer.setup:
+            w(f"    {step}\n")
+
+
+def _rich_answer(answer: Answer, p) -> None:  # type: ignore[no-untyped-def]
+    p()
+    p(f"  [bold]Question:[/bold] {escape(answer.question)}")
+    colour = {"answered": "green", "insufficient_evidence": "yellow"}.get(answer.status, "yellow")
+    p(f"  [bold {colour}]{escape(_answer_headline(answer))}[/bold {colour}]")
+    if answer.note:
+        p(f"    [dim]note: {escape(answer.note)}[/dim]")
+    if answer.message:
+        p(f"    {escape(answer.message)}")
+    for s in answer.sentences:
+        cite = f" [magenta]\\[{', '.join(s.citations)}][/magenta]" if s.citations else ""
+        p(f"    {escape(s.text)}{cite}")
+    if answer.sources:
+        p("    [bold]Sources[/bold]")
+        for item in answer.sources:
+            url = f"  [dim]{escape(item.url)}[/dim]" if item.url else ""
+            p(f"      [magenta]\\[{item.id}][/magenta] {escape(item.label)}{url}")
+    if answer.removed:
+        n = len(answer.removed)
+        plural = "s" if n != 1 else ""
+        p(f"    [yellow]Removed {n} sentence{plural} that had no valid citation (not shown as fact):[/yellow]")
+        for r in answer.removed:
+            p(f"      [dim]- {escape(r)}[/dim]")
+    if answer.setup:
+        p("    [dim]The Git evidence above is complete without AI. To get answers:[/dim]")
+        for step in answer.setup:
+            p(f"      {escape(step)}")

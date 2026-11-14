@@ -139,6 +139,8 @@ Options
   -g, --github            fetch linked issues / PRs / review comments
       --github-repo O/N   use this GitHub repository instead of the origin remote
   -m, --merges            inspect merge commits for edits made during conflict resolution
+      --ask QUESTION      answer a question about the line from the evidence (local Ollama model)
+      --model NAME        Ollama model for --ask (or GIT_WHY_MODEL); no default
   -F, --format FORMAT     auto (default) | rich | plain | json
       --json              shortcut for --format json
   -a, --all               do not dim formatting / move commits
@@ -219,6 +221,89 @@ git why src/app.py:42 --github
 - Rate limits, 401/403/404, server errors, malformed responses and network
   failures degrade to a warning; the local report is always produced and the
   exit code is unaffected.
+
+## Asking questions: `--ask`
+
+```
+git why src/app.py:42 --ask "Why is this timeout set to 30?"
+```
+
+`--ask` adds one section at the **end** of the normal report (which is printed
+unchanged). The answer is written by a model running **on your machine** via
+[Ollama](https://ollama.com), from the evidence in the report and nothing else:
+
+- The model sees a numbered *evidence pack* built from the report — commits
+  `[C1]…`, pull requests `[P1]…`, issues `[I1]…`, review comments `[R1]…` — and
+  must cite an ID after every factual sentence.
+- Sentences without a valid citation are **removed and listed** under
+  "Removed … sentence(s) that had no valid citation", so you always see what
+  the model tried to claim without support.
+- If the evidence does not answer the question, the model has to say
+  `Not in the evidence: …` instead of guessing. The report still shows the
+  evidence it had.
+- The `Sources` list maps every cited ID to a commit or thread URL so claims can
+  be checked in one click. Citations are checked *mechanically* (the ID must
+  exist); whether a sentence faithfully reflects its source is for you to verify
+  — that is why the header says "check the sources".
+
+MVP limits: a single `FILE:LINE` target (ranges, `--function`, `--text` come
+later); add `--github` to include PR discussion as evidence.
+
+### Setup (once)
+
+1. Install Ollama from <https://ollama.com/download> and start it.
+2. Download a model: `ollama pull llama3.2` (≈2 GB) or `ollama pull qwen2.5:7b` (≈5 GB).
+3. Run `git why FILE:LINE --ask "…" --model <name>`.
+
+There is **no default model**. If exactly one model is installed it is used and
+named in the output; if several are installed, git-why lists them and asks you
+to pick with `--model`. To settle on a default for your machine, run the same
+question once per model and compare how many sentences survive with valid
+citations, then `export GIT_WHY_MODEL=<name>`.
+
+Without Ollama the command still works — the history report is complete and the
+answer section explains what to install (real output from a machine without
+Ollama):
+
+```
+Question: Why does this line exist?
+AI answer: unavailable
+  Ollama is not running at http://127.0.0.1:11434 ([Errno 111] Connection refused)
+  The Git evidence above is complete without AI. To get answers:
+    1. Install Ollama (local, free): https://ollama.com/download - then start it.
+    2. Download a model, e.g.  ollama pull llama3.2   or   ollama pull qwen2.5:7b
+    3. Run:  git why README.md:1 --ask "Why does this line exist?" --model llama3.2
+    To choose a default for your machine: run the same question once per model and compare how many sentences survive with valid citations (shown below each answer); then set GIT_WHY_MODEL=<name>.
+```
+
+Layout of an answer. This was produced by the test suite with a **scripted
+model reply** on its fixture repository, to show the shape without pretending
+to be a real model's output:
+
+```
+Question: Why is RETRIES 0?
+AI answer (model example-model via local Ollama at http://127.0.0.1:11434; generated text - check the sources)
+  RETRIES was set to 0 when the config was created. [C1]
+  It was changed to a sentinel object to fix #42 and reverted to 0 because the sentinel broke the docs. [C2, C3]
+  Not in the evidence: why 0 rather than another number.
+  Sources
+    [C1] 95eb10e "A: base config" (Test Author, 2023-11-14)
+    [C2] 0b7178c "B: use sentinel" (Test Author, 2023-11-14)
+    [C3] c2bc2db "C: revert to 0, sentinel broke docs" (Test Author, 2023-11-14)
+  Removed 1 sentence that had no valid citation (not shown as fact):
+    - The sentinel was probably slower as well.
+```
+
+In JSON output the same information is under `"ask"` (`status`, `model`,
+`sentences` with `citations`, `sources`, `removed_uncited`, `setup`, the
+`evidence` pack and the `raw` model text).
+
+### Privacy
+
+Nothing is sent anywhere unless you pass `--ask`, and then only to Ollama on
+**localhost** (`http://127.0.0.1:11434`, or `OLLAMA_HOST` if it points at a
+loopback address). A non-local `OLLAMA_HOST` is refused unless you set
+`GIT_WHY_ALLOW_REMOTE_MODEL=1`. There is no cloud provider in this release.
 
 ## How it works
 

@@ -36,6 +36,8 @@ python -m build && twine check --strict dist/*
 | `git_why/refs.py` | Issue / PR / ticket references in commit messages |
 | `git_why/github.py` | Read-only GitHub client (stdlib `urllib`, injectable transport) |
 | `git_why/report.py` | The assembled report: evidence vs. inference, confidence, JSON schema |
+| `git_why/evidence.py` | `--ask`: numbers the report's facts into a citable evidence pack (pure) |
+| `git_why/ask.py` | `--ask`: local Ollama client (loopback only), model selection, citation validator |
 | `git_why/render.py` | rich / plain / JSON output |
 | `git_why/core.py` | The pipeline; `cli.py` is a thin typer wrapper around it |
 
@@ -47,8 +49,9 @@ Renderers never compute; `report.py` never prints. Keep it that way.
 - **Integration tests** build throwaway repositories in `tmp_path` using the
   helpers in `tests/conftest.py` (`make_repo`, `write_commit`, `git`). Each
   commit gets a distinct timestamp so ordering is deterministic.
-- **GitHub tests** use `FakeTransport` in `tests/test_github.py`. Tests must
-  never touch the network or require credentials.
+- **GitHub tests** use `FakeTransport` in `tests/test_github.py`; **`--ask`
+  tests** use `FakeOllama` in `tests/test_ask.py`. Tests must never touch the
+  network, require credentials, or need a model.
 - When you fix a bug, add a regression test that fails without the fix. If git
   itself behaves surprisingly, document that behaviour in a test too (see
   `test_git_log_L_alone_misses_side_branch`).

@@ -15,6 +15,11 @@
   There is no on-disk cache at all.
 - Repository content is never sent anywhere. Only issue/PR numbers and commit
   SHAs appear in API URLs.
+- With `--ask` the evidence pack (the line's text, commit messages and diff
+  lines for that line, and any PR text fetched with `--github`) is sent to an
+  **Ollama server on this machine** only. `OLLAMA_HOST` must resolve to a
+  loopback address unless `GIT_WHY_ALLOW_REMOTE_MODEL=1` is set explicitly.
+  No cloud model provider is built in, and no API keys are read.
 
 ## Hardening tips
 

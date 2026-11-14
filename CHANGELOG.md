@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `--ask QUESTION` (single `FILE:LINE` target): answers from the report's own
+  evidence using a **local Ollama model**. Every factual sentence must cite a
+  commit / PR / issue / comment ID from the evidence pack; sentences without a
+  valid citation are removed *and listed*; missing evidence is reported as
+  "Not in the evidence". No default model — `--model` / `GIT_WHY_MODEL`, or the
+  only installed model; otherwise the output lists installed models and how to
+  compare them. Without Ollama the normal report is printed with short setup
+  steps. Loopback-only by default (`GIT_WHY_ALLOW_REMOTE_MODEL=1` to override).
+  JSON gains an `"ask"` block; the report schema is unchanged.
+
 ## [0.1.1] - 2026-10-30
 
 ### Fixed
