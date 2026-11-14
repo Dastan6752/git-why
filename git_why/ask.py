@@ -58,7 +58,8 @@ SYSTEM_PROMPT = (
     "2. Use only IDs that appear in the evidence. Never cite anything else.\n"
     "3. A reason may be stated ONLY if the quoted text itself gives it as the reason. A concern, question or "
     "suggestion in a comment is not a decision: report it as what that person said, not as why the value was chosen. "
-    "Never turn 'X would be a problem' into 'X was chosen to avoid the problem'.\n"
+    "Never turn 'X would be a problem' into 'X was chosen to avoid the problem', and never write "
+    "'the reason is' unless the quoted words themselves say because / to fix / so that / broke.\n"
     "4. Do not add values, names, numbers or details that are not inside the evidence text you quote.\n"
     "5. If the evidence does not state the reason for the current value, or only part of it, end with one sentence "
     'that starts with "Not in the evidence:" saying exactly what is missing. '
@@ -88,9 +89,16 @@ say "Not in the evidence:" for anything the evidence does not state, especially 
 class Sentence:
     text: str
     citations: list[str] = field(default_factory=list)
+    claims_reason: bool = False  # the sentence presents something as *why* (allowed only if the quote states it)
+    is_insufficient: bool = False  # a "Not in the evidence:" sentence
 
     def to_dict(self) -> dict[str, Any]:
-        return {"text": self.text, "citations": list(self.citations)}
+        return {
+            "text": self.text,
+            "citations": list(self.citations),
+            "claims_reason": self.claims_reason,
+            "is_insufficient": self.is_insufficient,
+        }
 
 
 @dataclass
@@ -275,7 +283,8 @@ def setup_steps(target: str, question: str, installed: list[str] | None = None) 
 
 _CITE = re.compile(r"\[([A-Z]\d+(?:\s*,\s*[A-Z]\d+)*)\]")
 _SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])|\n+")
-_QUOTE = re.compile(r"[\"\u201c\u201d]([^\"\u201c\u201d]{3,}?)[\"\u201c\u201d]")
+# double quotes, curly double quotes, and curly single-quote PAIRS (a plain apostrophe is not a quote mark)
+_QUOTE = re.compile(r"[\"\u201c\u201d]([^\"\u201c\u201d]{3,}?)[\"\u201c\u201d]|\u2018([^\u2018\u2019]{3,}?)\u2019")
 _NORM = re.compile(r"[^a-z0-9 ]+")
 MIN_QUOTE_WORDS = 3
 
@@ -295,7 +304,45 @@ def normalise(text: str) -> str:
 
 
 def quotes_in(sentence: str) -> list[str]:
-    return [q.strip() for q in _QUOTE.findall(sentence) if len(q.split()) >= MIN_QUOTE_WORDS]
+    found = [(a or b).strip() for a, b in _QUOTE.findall(sentence)]
+    return [q for q in found if len(q.split()) >= MIN_QUOTE_WORDS]
+
+
+# --- reason claims -----------------------------------------------------------
+# The model may say *why* only if the quoted source states a reason itself. A
+# warning ("will make it a magic number"), question, or suggestion is not one.
+_CLAIMS_REASON = re.compile(
+    r"\bthe reason\b|\breasons? (for|why|is|was|being)\b|\bbecause\b|\bin order to\b|\bso that\b|\bto avoid\b"
+    r"|\bto prevent\b|\bdue to\b|\b(this|that) is why\b|\bexplains? why\b|\bwhy\b[^.]{0,60}\bis that\b"
+    r"|\bmotivat|\bintended to\b|\bpurpose\b|\bwas (chosen|picked|selected) to\b"
+    r"|\b(chosen|set|changed|added|introduced|reverted|kept|used|done|made)\b[^.\"]{0,40}"
+    r"\b(to avoid|to prevent|to fix|to make|to keep|to ensure|to be consistent|in order to|so that)\b",
+    re.I,
+)
+_REASON_IN_SOURCE = re.compile(
+    r"\bbecause\b|\bsince\b|\bso that\b|\bin order to\b|\bto avoid\b|\bto prevent\b|\bto fix\b|\bfix(es|ed)?\b"
+    r"|\breason\b|\bdue to\b|\botherwise\b|\bbroke\b|\bbreaks\b|\bbroken\b|\bneeded\b|\bneeds\b|\brequired\b"
+    r"|\bconsistent with\b|\bregress(ed|ion)\b|\bworkaround\b|\bbug\b",
+    re.I,
+)
+_HEDGE_IN_SOURCE = re.compile(
+    r"\bwould\b|\bwill make\b|\bmight\b|\bcould\b|\bperhaps\b|\bmaybe\b|\bshould we\b|\bwhat if\b|\bI think\b"
+    r"|\bI wonder\b|\bnot sure\b|\bconsider\b|\bsuggest\b|\?",
+    re.I,
+)
+REASON_NOT_IN_SOURCE = "states a reason, but the quoted source only raises a concern, question or suggestion"
+REASON_CONTRADICTED = 'states a reason while the answer also says "Not in the evidence" - the cautious sentence is kept'
+
+
+def claims_reason(sentence: str) -> bool:
+    """Does the model's own wording (outside the quotes) present something as the reason?"""
+    outside = _QUOTE.sub(" ", sentence)
+    return bool(_CLAIMS_REASON.search(outside))
+
+
+def quotes_state_reason(quotes: list[str]) -> bool:
+    """Every quote must itself contain reason language and no hedging/concern language."""
+    return all(_REASON_IN_SOURCE.search(q) and not _HEDGE_IN_SOURCE.search(q) for q in quotes)
 
 
 def quote_supported(quote: str, items: list[Item]) -> bool:
@@ -306,8 +353,12 @@ def quote_supported(quote: str, items: list[Item]) -> bool:
 def validate(raw: str, pack: EvidencePack) -> tuple[list[Sentence], list[Removed]]:
     """
     Keep a sentence only if it is a "Not in the evidence:" statement, or it cites
-    known IDs *and* every quote it contains occurs in one of the cited sources.
-    Everything else is returned in ``removed`` with the reason. Nothing is silently dropped.
+    known IDs *and* every quote it contains occurs in one of the cited sources
+    *and*, if it presents something as the reason, the quoted text itself states
+    a reason rather than a concern, question or suggestion. A reason claim is
+    also removed when the answer contains "Not in the evidence" (they contradict
+    each other; the cautious sentence wins). Everything removed is returned with
+    its reason. Nothing is silently dropped.
     """
     kept: list[Sentence] = []
     removed: list[Removed] = []
@@ -321,7 +372,7 @@ def validate(raw: str, pack: EvidencePack) -> tuple[list[Sentence], list[Removed
         if not clean:
             continue
         if clean.lower().startswith(INSUFFICIENT_PREFIX):
-            kept.append(Sentence(clean, []))
+            kept.append(Sentence(clean, [], is_insufficient=True))
             continue
         if not ids:
             removed.append(Removed(sentence.strip(), "no citation"))
@@ -339,7 +390,17 @@ def validate(raw: str, pack: EvidencePack) -> tuple[list[Sentence], list[Removed
         if bad:
             removed.append(Removed(sentence.strip(), f'quote "{bad[0]}" not found in [{", ".join(ids)}]'))
             continue
-        kept.append(Sentence(clean, ids))
+        is_reason = claims_reason(clean)
+        if is_reason and not quotes_state_reason(quotes):
+            removed.append(Removed(sentence.strip(), REASON_NOT_IN_SOURCE))
+            continue
+        kept.append(Sentence(clean, ids, claims_reason=is_reason))
+
+    # A reason claim and "Not in the evidence" cannot both stand for the same question.
+    if any(s.is_insufficient for s in kept) and any(s.claims_reason for s in kept):
+        for s in [s for s in kept if s.claims_reason]:
+            kept.remove(s)
+            removed.append(Removed(s.text, REASON_CONTRADICTED))
     return kept, removed
 
 

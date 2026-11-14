@@ -110,7 +110,7 @@ def test_validate_keeps_cited_removes_uncited_and_unknown(tmp_path: Path) -> Non
     pack = build(sample_report(tmp_path))
     raw = (
         'The line was added with the message "Fixes #42: double charges" [C1]. '
-        'It was later tuned because "p99 regressed" and the PR says "We measured p99" [C3][P1]. '
+        'It was later tuned; the commit says "p99 regressed" and the PR says "We measured p99" [C3][P1]. '
         "This was probably done for performance reasons. "
         'Someone also changed it in 2031 because "p99 regressed" [C42]. '
         "The reviewer said the value was tuned empirically [R1]. "
@@ -120,7 +120,7 @@ def test_validate_keeps_cited_removes_uncited_and_unknown(tmp_path: Path) -> Non
     kept, removed = validate(raw, pack)
     assert [s.text for s in kept] == [
         'The line was added with the message "Fixes #42: double charges".',
-        'It was later tuned because "p99 regressed" and the PR says "We measured p99".',
+        'It was later tuned; the commit says "p99 regressed" and the PR says "We measured p99".',
         "Not in the evidence: why exactly 0.3 was chosen.",
     ]
     assert [s.citations for s in kept] == [["C1"], ["C3", "P1"], []]
@@ -186,6 +186,85 @@ def test_validate_accepts_the_honest_answer() -> None:
     assert removed == []
     assert [s.citations for s in kept] == [["R2"], []]
     assert kept[1].text == "Not in the evidence: why the final value was set back to 0."
+
+
+def test_validate_rejects_concern_recast_as_the_reason_and_keeps_the_honest_sentences() -> None:
+    """
+    Exact failure from a real run: the quote is genuinely in R2, but R2 raises a
+    concern ("will make it a magic number"); it does not say this is why the final
+    value was set to 0. Only the descriptive sentence and "Not in the evidence" may stay.
+    """
+    raw = (
+        'The reason for setting DEFAULT_RETRIES to 0 is that using 0 "will make it a magic number" [R2]. '
+        "The PR discussion says using 0 \u2018will make it a magic number in this case\u2019 and considers a "
+        "sentinel object [R2]. "
+        "Not in the evidence: why the final value was set back to 0."
+    )
+    kept, removed = validate(raw, _retries_pack())
+    assert [s.text for s in kept] == [
+        "The PR discussion says using 0 \u2018will make it a magic number in this case\u2019 and considers a "
+        "sentinel object.",
+        "Not in the evidence: why the final value was set back to 0.",
+    ]
+    assert [s.citations for s in kept] == [["R2"], []]
+    assert not kept[0].claims_reason and kept[1].is_insufficient
+    assert len(removed) == 1
+    assert removed[0].text.startswith("The reason for setting DEFAULT_RETRIES to 0")
+    assert removed[0].reason == "states a reason, but the quoted source only raises a concern, question or suggestion"
+
+
+def test_validate_rejects_concern_as_reason_even_without_a_contradiction() -> None:
+    raw = 'The reason for setting DEFAULT_RETRIES to 0 is that using 0 "will make it a magic number" [R2].'
+    kept, removed = validate(raw, _retries_pack())
+    assert kept == [] and removed[0].reason.startswith("states a reason, but the quoted source")
+
+
+@pytest.mark.parametrize(
+    "framing",
+    [
+        'It was set to 0 to avoid a situation where "using 0 will make it a magic number" [R2].',
+        'Because "using 0 will make it a magic number", the sentinel was dropped [R2].',
+        'This is why "using 0 will make it a magic number" led to the change [R2].',
+        'The value was chosen so that "using 0 will make it a magic number" would not matter [R2].',
+    ],
+)
+def test_validate_rejects_other_causal_framings_of_a_concern(framing: str) -> None:
+    kept, removed = validate(framing, _retries_pack())
+    assert kept == [], framing
+    assert removed[0].reason.startswith("states a reason, but the quoted source")
+
+
+def test_validate_accepts_a_reason_the_source_actually_states() -> None:
+    from git_why.evidence import EvidencePack, Item
+
+    pack = EvidencePack(
+        "f:1",
+        "x",
+        [Item("C3", "commit", "c", 'commit c2bc2db: "C: revert to 0, sentinel broke docs". Added: RETRIES = 0.')],
+    )
+    kept, removed = validate('It was reverted to 0 because the "sentinel broke docs" [C3].', pack)
+    assert removed == [] and kept[0].claims_reason is True
+
+
+def test_validate_never_keeps_a_reason_next_to_not_in_the_evidence() -> None:
+    from git_why.evidence import EvidencePack, Item
+
+    pack = EvidencePack(
+        "f:1",
+        "x",
+        [Item("C3", "commit", "c", 'commit c2bc2db: "C: revert to 0, sentinel broke docs". Added: RETRIES = 0.')],
+    )
+    raw = 'It was reverted to 0 because the "sentinel broke docs" [C3]. Not in the evidence: why 0 exactly.'
+    kept, removed = validate(raw, pack)
+    assert [s.text for s in kept] == ["Not in the evidence: why 0 exactly."]
+    assert removed[0].reason.startswith('states a reason while the answer also says "Not in the evidence"')
+
+
+def test_quote_parsing_accepts_curly_single_quote_pairs_but_not_apostrophes() -> None:
+    from git_why.ask import quotes_in
+
+    assert quotes_in("says \u2018will make it a magic number\u2019 here") == ["will make it a magic number"]
+    assert quotes_in("it doesn\u2019t matter and isn\u2019t quoted") == []
 
 
 def test_quote_matching_ignores_backticks_case_and_punctuation() -> None:
@@ -432,7 +511,12 @@ def test_json_render_includes_ask_block(tmp_path: Path) -> None:
     assert data["schema_version"] == 1  # additive: the report part is unchanged
     block = data["ask"]
     assert block["status"] == "answered" and block["model"] == "m"
-    assert block["sentences"][0] == {"text": 'Created with "Fixes #42: double charges".', "citations": ["C1"]}
+    assert block["sentences"][0] == {
+        "text": 'Created with "Fixes #42: double charges".',
+        "citations": ["C1"],
+        "claims_reason": False,
+        "is_insufficient": False,
+    }
     assert block["sources"][0]["id"] == "C1"
     assert block["removed"] == [{"text": "It is fast.", "reason": "no citation"}]
     assert block["evidence"]["items"][0]["id"] == "C1"

@@ -238,13 +238,21 @@ unchanged). The answer is written by a model running **on your machine** via
 - Two mechanical checks run on every sentence: the cited IDs must exist, and
   each quoted phrase (3+ words) must actually occur in the cited source. A
   sentence that fails is **removed and listed with the reason** (`no citation`,
-  `unknown citation [C42]`, `no verbatim quote`, `quote "…" not found in [R2]`),
+  `unknown citation [C42]`, `no verbatim quote`, `quote "…" not found in [R2]`,
+  `states a reason, but the quoted source only raises a concern…`),
   so you always see what the model tried to claim. This is what catches a model
   that cites a review comment while reversing what it said.
-- A reason may only be stated if the quoted text gives it as the reason; a
-  concern or suggestion in a comment is reported as what that person said, not
-  as the decision. If the evidence does not state why the current value was
-  chosen, the model must end with `Not in the evidence: …` instead of guessing.
+- A third check targets *reasons*. If a sentence presents something as *why*
+  ("the reason is…", "because…", "was set to … to avoid…"), its quote must
+  itself state a reason (because / to fix / so that / broke …) and contain no
+  hedging (would / will make / perhaps / a question). A reviewer's warning that
+  a value "will make it a magic number" can be reported as what the reviewer
+  said, but never as the reason the value was chosen — the sentence is removed
+  with `states a reason, but the quoted source only raises a concern…`.
+- A reason claim and `Not in the evidence:` cannot both stand for the same
+  question: if the model writes both, the reason claim is removed and the
+  cautious sentence is kept. If the evidence does not state why the current
+  value was chosen, the model must end with `Not in the evidence: …`.
 - The `Sources` list maps every cited ID to a commit or thread URL. The checks
   prove the quote exists in the source; whether the surrounding sentence frames
   it fairly is still for you to verify — that is why the header says "check the

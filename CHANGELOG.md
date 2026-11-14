@@ -23,6 +23,11 @@ All notable changes to this project are documented here. The format follows
   a reason may only be stated if the quoted text gives it; concerns in review
   comments are not decisions; end with "Not in the evidence:" when the reason
   is not stated. (Found by a real run that cited a comment while reversing it.)
+- `--ask` reason check: a sentence that presents something as the reason is
+  kept only if its quote itself states a reason and contains no hedging or
+  question; a reason claim is never kept alongside "Not in the evidence". Curly
+  single-quote pairs are recognised as quotes. (Found by a real run that turned
+  a reviewer's warning into the decision.)
 
 ## [0.1.1] - 2026-10-30
 
