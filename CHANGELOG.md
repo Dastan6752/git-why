@@ -28,6 +28,11 @@ All notable changes to this project are documented here. The format follows
   question; a reason claim is never kept alongside "Not in the evidence". Curly
   single-quote pairs are recognised as quotes. (Found by a real run that turned
   a reviewer's warning into the decision.)
+- `--ask` fallback: when no factual sentence survives the checks, the answer
+  shows the most relevant comment as an exact quote with its link, then
+  "The evidence does not explain the final decision." Removed sentences are
+  now counted in normal output and listed only with `--show-removed` or in
+  JSON (`removed`, plus new `fallback`). Evidence items carry `quote`.
 
 ## [0.1.1] - 2026-10-30
 

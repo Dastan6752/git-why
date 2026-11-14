@@ -113,6 +113,21 @@ class Removed:
 
 
 @dataclass
+class Fallback:
+    """Shown when no factual sentence survived validation: the single most relevant
+    comment, quoted exactly, so the user still gets the best evidence with a link."""
+
+    item: Item
+    quote: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.item.id, "label": self.item.label, "url": self.item.url, "quote": self.quote}
+
+
+NO_DECISION = "The evidence does not explain the final decision."
+
+
+@dataclass
 class Answer:
     question: str
     # answered | insufficient_evidence | unavailable | no_model_selected
@@ -121,7 +136,8 @@ class Answer:
     model: str | None = None
     host: str = DEFAULT_HOST
     sentences: list[Sentence] = field(default_factory=list)
-    removed: list[Removed] = field(default_factory=list)  # sentences that failed the checks (always shown)
+    removed: list[Removed] = field(default_factory=list)  # sentences that failed the checks (count always shown)
+    fallback: Fallback | None = None  # best exact quote when nothing factual survived
     message: str = ""  # one-line explanation for non-answered states
     setup: list[str] = field(default_factory=list)  # short, explicit next steps
     note: str = ""  # e.g. "using the only installed model"
@@ -150,6 +166,7 @@ class Answer:
             "sentences": [s.to_dict() for s in self.sentences],
             "sources": [i.to_dict() for i in self.sources],
             "removed": [r.to_dict() for r in self.removed],
+            "fallback": self.fallback.to_dict() if self.fallback else None,
             "message": self.message or None,
             "setup": list(self.setup),
             "note": self.note or None,
@@ -473,8 +490,42 @@ def ask(
     answer.sentences, answer.removed = validate(raw, pack)
     has_fact = any(s.citations for s in answer.sentences)
     answer.status = "answered" if has_fact else "insufficient_evidence"
-    if not answer.sentences:
-        answer.message = (
-            "the model produced no sentence that quotes and cites the evidence; the evidence may not answer this"
-        )
+    if not has_fact:
+        answer.fallback = most_relevant_comment(pack, question, answer.removed)
+        if not answer.sentences and not answer.fallback:
+            answer.message = (
+                "the model produced no sentence that quotes and cites the evidence; the evidence may not answer this"
+            )
     return answer
+
+
+_STOPWORDS = frozenset(
+    {"the", "a", "an", "is", "are", "was", "were", "be", "been", "to", "of", "in", "on", "at", "for", "and", "or"}
+    | {"not", "this", "that", "it", "its", "why", "what", "how", "does", "did", "do", "set", "with", "from", "by"}
+    | {"as", "into", "than", "then", "there", "here", "have", "has", "had"}
+)
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in _NORM.sub(" ", text.lower().replace("`", "")).split() if len(t) > 1 and t not in _STOPWORDS}
+
+
+def most_relevant_comment(pack: EvidencePack, question: str, removed: list[Removed]) -> Fallback | None:
+    """
+    Pick the comment (else PR/issue description) that best matches the question and
+    whatever the model tried to quote. Deterministic: score, then pack order.
+    """
+    candidates = [i for i in pack.items if i.kind == "comment"] or [i for i in pack.items if i.kind in ("pr", "issue")]
+    if not candidates:
+        return None
+    wanted = _tokens(question)
+    pointed_at: set[str] = set()
+    for r in removed:
+        wanted |= _tokens(" ".join(quotes_in(r.text)))
+        pointed_at |= {c for group in _CITE.findall(r.text) for c in re.split(r"\s*,\s*", group)}
+
+    def score(item: Item) -> tuple[int, int]:
+        return (len(wanted & _tokens(item.text)), 1 if item.id in pointed_at else 0)
+
+    best = max(candidates, key=score)  # max() keeps the first of equal scores
+    return Fallback(best, best.quote or best.text)

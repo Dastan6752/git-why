@@ -141,6 +141,7 @@ Options
   -m, --merges            inspect merge commits for edits made during conflict resolution
       --ask QUESTION      answer a question about the line from the evidence (local Ollama model)
       --model NAME        Ollama model for --ask (or GIT_WHY_MODEL); no default
+      --show-removed      with --ask: list generated sentences that failed the evidence checks
   -F, --format FORMAT     auto (default) | rich | plain | json
       --json              shortcut for --format json
   -a, --all               do not dim formatting / move commits
@@ -237,10 +238,11 @@ unchanged). The answer is written by a model running **on your machine** via
   every factual sentence must **quote the source verbatim** and cite its ID.
 - Two mechanical checks run on every sentence: the cited IDs must exist, and
   each quoted phrase (3+ words) must actually occur in the cited source. A
-  sentence that fails is **removed and listed with the reason** (`no citation`,
-  `unknown citation [C42]`, `no verbatim quote`, `quote "…" not found in [R2]`,
-  `states a reason, but the quoted source only raises a concern…`),
-  so you always see what the model tried to claim. This is what catches a model
+  sentence that fails is **removed**; the normal output tells you how many were
+  removed, and `--show-removed` (or `--json`) lists each one with its reason
+  (`no citation`, `unknown citation [C42]`, `no verbatim quote`,
+  `quote "…" not found in [R2]`, `states a reason, but the quoted source only
+  raises a concern…`). Nothing is dropped silently. This is what catches a model
   that cites a review comment while reversing what it said.
 - A third check targets *reasons*. If a sentence presents something as *why*
   ("the reason is…", "because…", "was set to … to avoid…"), its quote must
@@ -253,6 +255,11 @@ unchanged). The answer is written by a model running **on your machine** via
   question: if the model writes both, the reason claim is removed and the
   cautious sentence is kept. If the evidence does not state why the current
   value was chosen, the model must end with `Not in the evidence: …`.
+- When **no factual sentence survives**, the answer does not go blank: it shows
+  the single most relevant comment from the evidence as an **exact quote with
+  its link** (chosen by overlap with your question and with whatever the model
+  tried to quote), followed by "The evidence does not explain the final
+  decision." — so you still get the best evidence, in the author's own words.
 - The `Sources` list maps every cited ID to a commit or thread URL. The checks
   prove the quote exists in the source; whether the surrounding sentence frames
   it fairly is still for you to verify — that is why the header says "check the
@@ -303,16 +310,37 @@ AI answer (model example-model via local Ollama at http://127.0.0.1:11434; gener
     [C1] 95eb10e "A: base config" (Test Author, 2023-11-14)
     [C2] 0b7178c "B: use sentinel" (Test Author, 2023-11-14)
     [C3] c2bc2db "C: revert to 0, sentinel broke docs" (Test Author, 2023-11-14)
-  Removed 2 sentences the evidence does not support (shown so nothing is hidden):
+  Removed 2 generated sentences the evidence does not support (--show-removed or --json lists them).
+```
+
+With `--show-removed` the last line expands to the audit list:
+
+```
+  Removed 2 sentences the evidence does not support:
     - The sentinel was chosen to avoid a magic number [C2].
       reason: no verbatim quote from the cited source
     - The reviewer said the sentinel "was too slow in practice" [C3].
       reason: quote "was too slow in practice" not found in [C3]
 ```
 
+And when every factual sentence fails the checks (this reproduces a real
+`llama3.2` answer on `psf/requests`, replayed through the test suite against the
+same evidence; the link is a placeholder in the fixture):
+
+```
+Question: Why is DEFAULT_RETRIES 0?
+AI answer (model llama3.2): the gathered evidence does not answer this question
+  Most relevant comment in the evidence (exact quote) [R2]:
+    "I realize that using `0` will make it a magic number in this case. Perhaps on the sentinel object we set a `value`, e.g.,"
+    - @sigmavirus24 (review comment) on PR #2216  https://example.invalid/pull/2216#r2
+  The evidence does not explain the final decision.
+  Not in the evidence: why the final value was set back to 0.
+  Removed 1 generated sentence the evidence does not support (--show-removed or --json lists them).
+```
+
 In JSON output the same information is under `"ask"` (`status`, `model`,
-`sentences` with `citations`, `sources`, `removed_uncited`, `setup`, the
-`evidence` pack and the `raw` model text).
+`sentences` with `citations`, `sources`, `removed` with reasons, `fallback`,
+`setup`, the `evidence` pack and the `raw` model text).
 
 ### Privacy
 

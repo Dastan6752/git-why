@@ -33,6 +33,7 @@ class Item:
     label: str  # short human label for the Sources list
     text: str  # what the model reads
     url: str | None = None
+    quote: str = ""  # the exact human-written text (comment body, commit subject) - for verbatim display
 
     def to_dict(self) -> dict[str, Any]:
         return {"id": self.id, "kind": self.kind, "label": self.label, "url": self.url}
@@ -96,6 +97,7 @@ def build(report: Report, *, budget: int = DEFAULT_BUDGET) -> EvidencePack:
                     + (f" (file {c.path})" if c.path else "")
                     + f": {_clip(c.body, MAX_COMMENT_CHARS)}",
                     url=c.url,
+                    quote=_clip(c.body, MAX_COMMENT_CHARS),
                 )
             )
 
@@ -180,6 +182,7 @@ def _thread_item(thread: Thread, item_id: str) -> Item:
         kind=thread.kind,
         label=f'{name} #{thread.number} "{thread.title}"',
         text=" ".join(parts),
+        quote=body or thread.title,
         url=thread.url,
     )
 

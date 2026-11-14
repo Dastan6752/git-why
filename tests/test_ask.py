@@ -5,7 +5,8 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from git_why import ask as ask_mod
@@ -150,10 +151,29 @@ def _retries_pack() -> Any:
                 "commit 2eb7e3c8: Removed: DEFAULT_RETRIES = object(). Added: DEFAULT_RETRIES = 0.",
             ),
             Item(
+                "P1",
+                "pr",
+                'PR #2216 "Retries"',
+                'PR #2216 "Retries" (closed) opened by @someone. Description: Adds max_retries handling.',
+                url="https://example.invalid/pull/2216",
+                quote="Adds max_retries handling.",
+            ),
+            Item(
+                "R1",
+                "comment",
+                "@someone (comment) on PR #2216",
+                "@someone comment on P1: LGTM, will merge after CI.",
+                url="https://example.invalid/pull/2216#c1",
+                quote="LGTM, will merge after CI.",
+            ),
+            Item(
                 "R2",
                 "comment",
-                "@sigmavirus24",
-                "@sigmavirus24 comment on P1: I realize that using `0` will make it a magic number in this case. "
+                "@sigmavirus24 (review comment) on PR #2216",
+                "@sigmavirus24 review comment on P1: I realize that using `0` will make it a magic number in this case. "
+                "Perhaps on the sentinel object we set a `value`, e.g.,",
+                url="https://example.invalid/pull/2216#r2",
+                quote="I realize that using `0` will make it a magic number in this case. "
                 "Perhaps on the sentinel object we set a `value`, e.g.,",
             ),
         ],
@@ -258,6 +278,94 @@ def test_validate_never_keeps_a_reason_next_to_not_in_the_evidence() -> None:
     kept, removed = validate(raw, pack)
     assert [s.text for s in kept] == ["Not in the evidence: why 0 exactly."]
     assert removed[0].reason.startswith('states a reason while the answer also says "Not in the evidence"')
+
+
+LLAMA32_OBSERVED = (
+    'The reason for setting DEFAULT_RETRIES to 0 is that using 0 "will make it a magic number" [R2]. '
+    "The PR discussion says using 0 \u2018will make it a magic number in this case\u2019 and considers a "
+    "sentinel object [R2]. "
+    "Not in the evidence: why the final value was set back to 0."
+)
+HONEST_LINE = (
+    "The PR discussion says using 0 \u2018will make it a magic number in this case\u2019 and considers a "
+    "sentinel object. [R2]"
+)
+
+
+def _ask_with_pack(raw: str, monkeypatch: pytest.MonkeyPatch, question: str = "Why is DEFAULT_RETRIES 0?") -> Any:
+    """Run the full ask() pipeline (FakeOllama -> validate -> fallback) against the requests evidence pack."""
+    import git_why.ask as ask_mod
+
+    monkeypatch.setattr(ask_mod, "build", lambda report, budget: _retries_pack())
+    fake = FakeOllama(models=["llama3.2"], reply=raw)
+    report = SimpleNamespace(target=SimpleNamespace(label="src/requests/adapters.py:81"))
+    return ask(cast(Any, report), question, model="llama3.2", client=fake.client())
+
+
+def test_regression_llama32_observed_output_rendered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The llama3.2 answer observed on psf/requests: only the two honest sentences may reach the terminal."""
+    answer = _ask_with_pack(LLAMA32_OBSERVED, monkeypatch)
+    assert answer.status == "answered" and answer.fallback is None
+    buf = io.StringIO()
+    render_plain(sample_report(tmp_path), out=buf, answer=answer)
+    out = buf.getvalue()[buf.getvalue().index("Question:") :]
+    assert out.splitlines()[2:4] == [
+        f"  {HONEST_LINE}",
+        "  Not in the evidence: why the final value was set back to 0.",
+    ]
+    assert "The reason for setting" not in out and 'magic number" [R2]' not in out
+    assert "[R2] @sigmavirus24 (review comment) on PR #2216  https://example.invalid/pull/2216#r2" in out
+    assert "Removed 1 generated sentence the evidence does not support (--show-removed or --json lists them)." in out
+    assert "reason:" not in out  # the detailed list is not part of normal output
+
+
+def test_regression_llama32_when_only_the_false_reason_is_produced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same run without the honest sentence: validation removes every factual sentence, so the user
+    gets the most relevant comment as an exact quote with its link, then the no-decision line."""
+    raw = (
+        'The reason for setting DEFAULT_RETRIES to 0 is that using 0 "will make it a magic number" [R2]. '
+        "Not in the evidence: why the final value was set back to 0."
+    )
+    answer = _ask_with_pack(raw, monkeypatch)
+    assert answer.status == "insufficient_evidence"
+    assert answer.fallback is not None and answer.fallback.item.id == "R2"
+    assert [s.text for s in answer.sentences] == ["Not in the evidence: why the final value was set back to 0."]
+    buf = io.StringIO()
+    render_plain(sample_report(tmp_path), out=buf, answer=answer)
+    out = buf.getvalue()[buf.getvalue().index("Question:") :]
+    assert out.splitlines()[1:7] == [
+        "AI answer (model llama3.2): the gathered evidence does not answer this question",
+        "  Most relevant comment in the evidence (exact quote) [R2]:",
+        '    "I realize that using `0` will make it a magic number in this case. '
+        'Perhaps on the sentinel object we set a `value`, e.g.,"',
+        "    - @sigmavirus24 (review comment) on PR #2216  https://example.invalid/pull/2216#r2",
+        "  The evidence does not explain the final decision.",
+        "  Not in the evidence: why the final value was set back to 0.",
+    ]
+    assert "The reason for setting" not in out
+    assert "Removed 1 generated sentence" in out and "reason:" not in out
+    # JSON keeps the full audit trail
+    assert answer.to_dict()["fallback"]["url"] == "https://example.invalid/pull/2216#r2"
+    assert answer.to_dict()["removed"][0]["reason"].startswith("states a reason, but the quoted source")
+
+
+def test_fallback_picks_the_comment_matching_question_and_attempted_quotes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # nothing in the question matches R2, but the model tried to quote it -> R2 still wins over R1
+    answer = _ask_with_pack('It was "a magic number" obviously [R1].', monkeypatch)
+    assert answer.fallback is not None and answer.fallback.item.id == "R2"
+    # with no hint at all, the question decides; "merge" matches R1
+    a = _ask_with_pack("No idea.", monkeypatch, question="When will this merge after CI?")
+    assert a.fallback is not None and a.fallback.item.id == "R1"
+
+
+def test_fallback_is_none_without_comments_or_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    from git_why.ask import most_relevant_comment
+    from git_why.evidence import EvidencePack, Item
+
+    pack = EvidencePack("f:1", "x", [Item("C1", "commit", "c", "commit c: fix")])
+    assert most_relevant_comment(pack, "why?", []) is None
 
 
 def test_quote_parsing_accepts_curly_single_quote_pairs_but_not_apostrophes() -> None:
@@ -389,7 +497,8 @@ def test_ask_everything_uncited(tmp_path: Path) -> None:
     a = ask(sample_report(tmp_path), "why?", model="m", client=fake.client())
     assert a.status == "insufficient_evidence"
     assert a.sentences == [] and [r.text for r in a.removed] == ["It is for performance.", "Trust me."]
-    assert "no sentence that quotes and cites" in a.message
+    # nothing factual survived: the best exact quote (here the only review comment) is offered instead
+    assert a.fallback is not None and a.fallback.item.id == "R1" and a.message == ""
 
 
 def test_ask_chat_failure_is_reported(tmp_path: Path) -> None:
@@ -478,8 +587,15 @@ def test_plain_render_puts_answer_last_with_sources_and_removed(tmp_path: Path) 
     assert '  Created with "Fixes #42: double charges". [C1]' in tail
     assert "  Not in the evidence: why 0.4." in tail
     assert "  Sources\n    [C1] aaaaaaa" in tail and "https://github.com/o/r/commit/" in tail
-    assert "Removed 1 sentence the evidence does not support (shown so nothing is hidden):\n" in tail
-    assert "    - It is fast.\n      reason: no citation\n" in tail
+    # the normal output only counts removed sentences; the list is opt-in
+    assert "Removed 1 generated sentence the evidence does not support (--show-removed or --json lists them).\n" in tail
+    assert "It is fast." not in tail
+    buf = io.StringIO()
+    render_plain(report, out=buf, answer=answer, show_removed=True)
+    assert (
+        "Removed 1 sentence the evidence does not support:\n    - It is fast.\n      reason: no citation\n"
+        in buf.getvalue()
+    )
 
 
 def test_rich_render_contains_answer_section(tmp_path: Path) -> None:
@@ -487,7 +603,11 @@ def test_rich_render_contains_answer_section(tmp_path: Path) -> None:
     buf = io.StringIO()
     render_rich(report, out=buf, color=False, answer=answer)
     out = buf.getvalue()
-    assert "Question: why 0.4?" in out and "[C1]" in out and "Removed 1 sentence" in out and "- It is fast." in out
+    assert "Question: why 0.4?" in out and "[C1]" in out and "Removed 1 generated sentence" in out
+    assert "It is fast." not in out
+    buf = io.StringIO()
+    render_rich(report, out=buf, color=False, answer=answer, show_removed=True)
+    assert "- It is fast." in buf.getvalue() and "reason: no citation" in buf.getvalue()
 
 
 def test_plain_render_unavailable_shows_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -569,7 +689,8 @@ def test_cli_ask_answers_from_real_repo_evidence(blind_spot_repo: Path, monkeypa
     assert "RETRIES = 0" in out and "Summary (inferred)" in out  # the normal report is intact
     assert "Question: Why is RETRIES 0?" in out
     assert 'The sentinel was reverted; the commit says "revert to 0, sentinel broke docs". [C3]' in out
-    assert "Removed 1 sentence the evidence does not support" in out and "- Probably also slow." in out
+    assert "Removed 1 generated sentence the evidence does not support" in out
+    assert "Probably also slow." not in out  # details are behind --show-removed / --json
     # the model only ever saw git evidence from this repo
     _, payload = fake.calls[-1]
     assert payload is not None and "C: revert to 0, sentinel broke docs" in payload["messages"][1]["content"]

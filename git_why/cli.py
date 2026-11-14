@@ -113,6 +113,9 @@ def main(
     model: str | None = typer.Option(
         None, "--model", help="Ollama model for --ask (no default; see --ask output)", envvar="GIT_WHY_MODEL"
     ),
+    show_removed: bool = typer.Option(
+        False, "--show-removed", help="With --ask: list the generated sentences that failed the evidence checks"
+    ),
     fmt: str = typer.Option("auto", "--format", "-F", help="auto | rich | plain | json", metavar="FORMAT"),
     json_flag: bool = typer.Option(False, "--json", help="Shortcut for --format json"),
     show_all: bool = typer.Option(False, "--all", "-a", help="Do not classify formatting/move commits as noise"),
@@ -182,9 +185,11 @@ def main(
     if output == "json":
         render_json(report, answer=answer)
     elif output == "plain":
-        render_plain(report, max_body=max_body, answer=answer)
+        render_plain(report, max_body=max_body, answer=answer, show_removed=show_removed)
     else:
-        render_rich(report, color=False if no_color else None, max_body=max_body, answer=answer)
+        render_rich(
+            report, color=False if no_color else None, max_body=max_body, answer=answer, show_removed=show_removed
+        )
 
     if not report.steps:
         typer.secho("no history found for this target", fg="yellow", err=True)

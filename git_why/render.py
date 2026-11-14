@@ -14,7 +14,7 @@ from typing import IO, Any
 from rich.console import Console
 from rich.markup import escape
 
-from .ask import Answer
+from .ask import NO_DECISION, Answer
 from .history import Step
 from .report import Report
 
@@ -65,6 +65,7 @@ def render_rich(
     max_body: int = 6,
     out: IO[str] | None = None,
     answer: Answer | None = None,
+    show_removed: bool = False,
 ) -> None:
     out = out or sys.stdout
     console = Console(
@@ -103,7 +104,7 @@ def render_rich(
     for w in report.warnings + report.github.warnings:
         p(f"  [yellow]warning:[/yellow] {escape(w)}")
     if answer is not None:
-        _rich_answer(answer, p)
+        _rich_answer(answer, p, show_removed)
     p()
 
 
@@ -194,7 +195,12 @@ def _rich_thread(thread, p) -> None:  # type: ignore[no-untyped-def]
 
 
 def render_plain(
-    report: Report, *, max_body: int = 6, out: IO[str] | None = None, answer: Answer | None = None
+    report: Report,
+    *,
+    max_body: int = 6,
+    out: IO[str] | None = None,
+    answer: Answer | None = None,
+    show_removed: bool = False,
 ) -> None:
     out = out or sys.stdout
     w = out.write
@@ -266,7 +272,7 @@ def render_plain(
     for warning in report.warnings + report.github.warnings:
         w(f"warning: {warning}\n")
     if answer is not None:
-        _plain_answer(answer, w)
+        _plain_answer(answer, w, show_removed)
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +290,17 @@ def _answer_headline(answer: Answer) -> str:
     return "AI answer: unavailable"
 
 
-def _plain_answer(answer: Answer, w: Callable[[str], Any]) -> None:
+def _removed_headline(answer: Answer, show_removed: bool) -> str:
+    n = len(answer.removed)
+    plural = "s" if n != 1 else ""
+    if show_removed:
+        return f"Removed {n} sentence{plural} the evidence does not support:"
+    return (
+        f"Removed {n} generated sentence{plural} the evidence does not support (--show-removed or --json lists them)."
+    )
+
+
+def _plain_answer(answer: Answer, w: Callable[[str], Any], show_removed: bool = False) -> None:
     w("\n")
     w(f"Question: {answer.question}\n")
     w(_answer_headline(answer) + "\n")
@@ -292,6 +308,12 @@ def _plain_answer(answer: Answer, w: Callable[[str], Any]) -> None:
         w(f"  note: {answer.note}\n")
     if answer.message:
         w(f"  {answer.message}\n")
+    if answer.fallback:
+        fb = answer.fallback
+        w(f"  Most relevant comment in the evidence (exact quote) [{fb.item.id}]:\n")
+        w(f'    "{fb.quote}"\n')
+        w(f"    - {fb.item.label}" + (f"  {fb.item.url}" if fb.item.url else "") + "\n")
+        w(f"  {NO_DECISION}\n")
     for s in answer.sentences:
         cite = f" [{', '.join(s.citations)}]" if s.citations else ""
         w(f"  {s.text}{cite}\n")
@@ -300,18 +322,17 @@ def _plain_answer(answer: Answer, w: Callable[[str], Any]) -> None:
         for item in answer.sources:
             w(f"    [{item.id}] {item.label}" + (f"  {item.url}" if item.url else "") + "\n")
     if answer.removed:
-        n = len(answer.removed)
-        plural = "s" if n != 1 else ""
-        w(f"  Removed {n} sentence{plural} the evidence does not support (shown so nothing is hidden):\n")
-        for r in answer.removed:
-            w(f"    - {r.text}\n      reason: {r.reason}\n")
+        w(f"  {_removed_headline(answer, show_removed)}\n")
+        if show_removed:
+            for r in answer.removed:
+                w(f"    - {r.text}\n      reason: {r.reason}\n")
     if answer.setup:
         w("  The Git evidence above is complete without AI. To get answers:\n")
         for step in answer.setup:
             w(f"    {step}\n")
 
 
-def _rich_answer(answer: Answer, p) -> None:  # type: ignore[no-untyped-def]
+def _rich_answer(answer: Answer, p, show_removed: bool = False) -> None:  # type: ignore[no-untyped-def]
     p()
     p(f"  [bold]Question:[/bold] {escape(answer.question)}")
     colour = {"answered": "green", "insufficient_evidence": "yellow"}.get(answer.status, "yellow")
@@ -320,6 +341,13 @@ def _rich_answer(answer: Answer, p) -> None:  # type: ignore[no-untyped-def]
         p(f"    [dim]note: {escape(answer.note)}[/dim]")
     if answer.message:
         p(f"    {escape(answer.message)}")
+    if answer.fallback:
+        fb = answer.fallback
+        p(f"    Most relevant comment in the evidence (exact quote) [magenta]\\[{fb.item.id}][/magenta]:")
+        p(f'      [italic]"{escape(fb.quote)}"[/italic]')
+        url = f"  [dim]{escape(fb.item.url)}[/dim]" if fb.item.url else ""
+        p(f"      - {escape(fb.item.label)}{url}")
+        p(f"    [bold]{NO_DECISION}[/bold]")
     for s in answer.sentences:
         cite = f" [magenta]\\[{', '.join(s.citations)}][/magenta]" if s.citations else ""
         p(f"    {escape(s.text)}{cite}")
@@ -329,13 +357,11 @@ def _rich_answer(answer: Answer, p) -> None:  # type: ignore[no-untyped-def]
             url = f"  [dim]{escape(item.url)}[/dim]" if item.url else ""
             p(f"      [magenta]\\[{item.id}][/magenta] {escape(item.label)}{url}")
     if answer.removed:
-        n = len(answer.removed)
-        plural = "s" if n != 1 else ""
-        head = f"Removed {n} sentence{plural} the evidence does not support (shown so nothing is hidden):"
-        p(f"    [yellow]{head}[/yellow]")
-        for r in answer.removed:
-            p(f"      [dim]- {escape(r.text)}[/dim]")
-            p(f"        [dim]reason: {escape(r.reason)}[/dim]")
+        p(f"    [yellow]{escape(_removed_headline(answer, show_removed))}[/yellow]")
+        if show_removed:
+            for r in answer.removed:
+                p(f"      [dim]- {escape(r.text)}[/dim]")
+                p(f"        [dim]reason: {escape(r.reason)}[/dim]")
     if answer.setup:
         p("    [dim]The Git evidence above is complete without AI. To get answers:[/dim]")
         for step in answer.setup:
