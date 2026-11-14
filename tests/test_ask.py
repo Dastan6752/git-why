@@ -109,25 +109,104 @@ def test_split_sentences_handles_citations_and_newlines() -> None:
 def test_validate_keeps_cited_removes_uncited_and_unknown(tmp_path: Path) -> None:
     pack = build(sample_report(tmp_path))
     raw = (
-        "The line was added to fix double charges [C1]. "
-        "It was later tuned after a p99 regression [C3][P1]. "
+        'The line was added with the message "Fixes #42: double charges" [C1]. '
+        'It was later tuned because "p99 regressed" and the PR says "We measured p99" [C3][P1]. '
         "This was probably done for performance reasons. "
-        "Someone also changed it in 2031 [C42]. "
-        "Reviewer noted the value was empirical [R1, P1]. "
+        'Someone also changed it in 2031 because "p99 regressed" [C42]. '
+        "The reviewer said the value was tuned empirically [R1]. "
+        'The reviewer said "0.3 was chosen at random" [R1, P1]. '
         "Not in the evidence: why exactly 0.3 was chosen."
     )
     kept, removed = validate(raw, pack)
     assert [s.text for s in kept] == [
-        "The line was added to fix double charges.",
-        "It was later tuned after a p99 regression.",
-        "Reviewer noted the value was empirical.",
+        'The line was added with the message "Fixes #42: double charges".',
+        'It was later tuned because "p99 regressed" and the PR says "We measured p99".',
         "Not in the evidence: why exactly 0.3 was chosen.",
     ]
-    assert [s.citations for s in kept] == [["C1"], ["C3", "P1"], ["R1", "P1"], []]
-    assert removed == [
-        "This was probably done for performance reasons.",
-        "Someone also changed it in 2031 [C42].",
+    assert [s.citations for s in kept] == [["C1"], ["C3", "P1"], []]
+    assert [(r.text, r.reason) for r in removed] == [
+        ("This was probably done for performance reasons.", "no citation"),
+        ('Someone also changed it in 2031 because "p99 regressed" [C42].', "unknown citation [C42]"),
+        ("The reviewer said the value was tuned empirically [R1].", "no verbatim quote from the cited source"),
+        (
+            'The reviewer said "0.3 was chosen at random" [R1, P1].',
+            'quote "0.3 was chosen at random" not found in [R1, P1]',
+        ),
     ]
+
+
+def _retries_pack() -> Any:
+    """The psf/requests DEFAULT_RETRIES evidence, as the model saw it when it reversed a comment's meaning."""
+    from git_why.evidence import EvidencePack, Item
+
+    return EvidencePack(
+        target="src/requests/adapters.py:81",
+        line="DEFAULT_RETRIES = 0",
+        items=[
+            Item(
+                "C3",
+                "commit",
+                "2eb7e3c8",
+                "commit 2eb7e3c8: Removed: DEFAULT_RETRIES = object(). Added: DEFAULT_RETRIES = 0.",
+            ),
+            Item(
+                "R2",
+                "comment",
+                "@sigmavirus24",
+                "@sigmavirus24 comment on P1: I realize that using `0` will make it a magic number in this case. "
+                "Perhaps on the sentinel object we set a `value`, e.g.,",
+            ),
+        ],
+    )
+
+
+def test_validate_rejects_reversed_meaning_and_invented_detail() -> None:
+    """A real model answer: cited [R2] but inverted it and added a detail R2 never mentions."""
+    raw = (
+        "The value 0 was chosen to avoid a magic number, with DEFAULT_RETRIES.value = 0 on the sentinel [R2]. "
+        "The value was set back to 0 in October 2014 [C3]."
+    )
+    kept, removed = validate(raw, _retries_pack())
+    assert kept == []
+    assert [r.reason for r in removed] == ["no verbatim quote from the cited source"] * 2
+
+
+def test_validate_rejects_a_quote_the_source_never_said() -> None:
+    kept, removed = validate('The reviewer said 0 "avoids a magic number" [R2].', _retries_pack())
+    assert kept == []
+    assert removed[0].reason == 'quote "avoids a magic number" not found in [R2]'
+
+
+def test_validate_accepts_the_honest_answer() -> None:
+    raw = (
+        'The PR discussion says that using 0 "will make it a magic number in this case" and considers a sentinel '
+        "object [R2]. Not in the evidence: why the final value was set back to 0."
+    )
+    kept, removed = validate(raw, _retries_pack())
+    assert removed == []
+    assert [s.citations for s in kept] == [["R2"], []]
+    assert kept[1].text == "Not in the evidence: why the final value was set back to 0."
+
+
+def test_quote_matching_ignores_backticks_case_and_punctuation() -> None:
+    kept, _ = validate('It says "using 0 will make it a magic number" [R2].', _retries_pack())
+    assert len(kept) == 1
+    kept, _ = validate('It notes "we set a `value`" on the sentinel [R2].', _retries_pack())
+    assert len(kept) == 1
+
+
+def test_short_quotes_do_not_count() -> None:
+    _, removed = validate('The value is "0" [C3].', _retries_pack())
+    assert removed[0].reason == "no verbatim quote from the cited source"
+
+
+def test_system_prompt_carries_the_reason_rules() -> None:
+    from git_why.ask import SYSTEM_PROMPT
+
+    assert "verbatim quote" in SYSTEM_PROMPT
+    assert "A concern, question or suggestion in a comment is not a decision" in SYSTEM_PROMPT
+    assert "Not in the evidence:" in SYSTEM_PROMPT
+    assert "will make it a magic number in this case" in SYSTEM_PROMPT  # the worked example
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +246,7 @@ def test_ask_several_models_and_none_selected_lists_them(tmp_path: Path, monkeyp
 
 def test_ask_uses_the_only_installed_model_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GIT_WHY_MODEL", raising=False)
-    fake = FakeOllama(models=["qwen2.5:7b"], reply="The line was added to fix double charges [C1].")
+    fake = FakeOllama(models=["qwen2.5:7b"], reply='The line was added with "Fixes #42: double charges" [C1].')
     a = ask(sample_report(tmp_path), "why?", client=fake.client())
     assert a.status == "answered" and a.model == "qwen2.5:7b"
     assert a.note == "using qwen2.5:7b, the only installed model"
@@ -182,14 +261,14 @@ def test_ask_requested_model_not_installed(tmp_path: Path) -> None:
 
 
 def test_ask_model_name_matches_latest_tag(tmp_path: Path) -> None:
-    fake = FakeOllama(models=["llama3.2:latest"], reply="Added to fix double charges [C1].")
+    fake = FakeOllama(models=["llama3.2:latest"], reply='Added with "Fixes #42: double charges" [C1].')
     a = ask(sample_report(tmp_path), "why?", model="llama3.2", client=fake.client())
     assert a.status == "answered" and a.model == "llama3.2:latest"
 
 
 def test_ask_env_model_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_WHY_MODEL", "qwen2.5:7b")
-    fake = FakeOllama(models=["qwen2.5:7b", "other"], reply="Added to fix double charges [C1].")
+    fake = FakeOllama(models=["qwen2.5:7b", "other"], reply='Added with "Fixes #42: double charges" [C1].')
     a = ask(sample_report(tmp_path), "why?", client=fake.client())
     assert a.status == "answered" and a.model == "qwen2.5:7b"
 
@@ -198,7 +277,8 @@ def test_ask_full_answer_sources_and_removed(tmp_path: Path) -> None:
     fake = FakeOllama(
         models=["m"],
         reply=(
-            "The line was created to fix double charges [C1]. It was tuned after a p99 regression [C3][P1]. "
+            'The line was created with "Fixes #42: double charges" [C1]. '
+            'It was tuned when "p99 regressed" and the PR says "We measured p99" [C3][P1]. '
             "This is clearly a performance optimisation. Not in the evidence: who approved the value."
         ),
     )
@@ -206,7 +286,7 @@ def test_ask_full_answer_sources_and_removed(tmp_path: Path) -> None:
     assert a.status == "answered"
     assert [i.id for i in a.sources] == ["C1", "C3", "P1"]
     assert a.sources[2].url == "https://github.com/o/r/pull/99"
-    assert a.removed == ["This is clearly a performance optimisation."]
+    assert [(r.text, r.reason) for r in a.removed] == [("This is clearly a performance optimisation.", "no citation")]
     assert a.raw.startswith("The line was created")
     # what the model was given
     url, payload = fake.calls[-1]
@@ -229,8 +309,8 @@ def test_ask_everything_uncited(tmp_path: Path) -> None:
     fake = FakeOllama(models=["m"], reply="It is for performance. Trust me.")
     a = ask(sample_report(tmp_path), "why?", model="m", client=fake.client())
     assert a.status == "insufficient_evidence"
-    assert a.sentences == [] and a.removed == ["It is for performance.", "Trust me."]
-    assert "no sentence with a valid citation" in a.message
+    assert a.sentences == [] and [r.text for r in a.removed] == ["It is for performance.", "Trust me."]
+    assert "no sentence that quotes and cites" in a.message
 
 
 def test_ask_chat_failure_is_reported(tmp_path: Path) -> None:
@@ -301,7 +381,7 @@ def test_client_handles_bad_server_responses() -> None:
 def _answered(tmp_path: Path) -> tuple[Any, Answer]:
     report = sample_report(tmp_path)
     fake = FakeOllama(
-        models=["m"], reply="Created to fix double charges [C1]. It is fast. Not in the evidence: why 0.4."
+        models=["m"], reply='Created with "Fixes #42: double charges" [C1]. It is fast. Not in the evidence: why 0.4.'
     )
     return report, ask(report, "why 0.4?", model="m", client=fake.client())
 
@@ -316,10 +396,11 @@ def test_plain_render_puts_answer_last_with_sources_and_removed(tmp_path: Path) 
     assert summary_at < question_at, "the normal report comes first, untouched"
     tail = out[question_at:]
     assert "AI answer (model m via local Ollama at http://127.0.0.1:11434; generated text - check the sources)" in tail
-    assert "  Created to fix double charges. [C1]" in tail
+    assert '  Created with "Fixes #42: double charges". [C1]' in tail
     assert "  Not in the evidence: why 0.4." in tail
     assert "  Sources\n    [C1] aaaaaaa" in tail and "https://github.com/o/r/commit/" in tail
-    assert "Removed 1 sentence that had no valid citation (not shown as fact):\n    - It is fast." in tail
+    assert "Removed 1 sentence the evidence does not support (shown so nothing is hidden):\n" in tail
+    assert "    - It is fast.\n      reason: no citation\n" in tail
 
 
 def test_rich_render_contains_answer_section(tmp_path: Path) -> None:
@@ -351,11 +432,11 @@ def test_json_render_includes_ask_block(tmp_path: Path) -> None:
     assert data["schema_version"] == 1  # additive: the report part is unchanged
     block = data["ask"]
     assert block["status"] == "answered" and block["model"] == "m"
-    assert block["sentences"][0] == {"text": "Created to fix double charges.", "citations": ["C1"]}
+    assert block["sentences"][0] == {"text": 'Created with "Fixes #42: double charges".', "citations": ["C1"]}
     assert block["sources"][0]["id"] == "C1"
-    assert block["removed_uncited"] == ["It is fast."]
+    assert block["removed"] == [{"text": "It is fast.", "reason": "no citation"}]
     assert block["evidence"]["items"][0]["id"] == "C1"
-    assert block["raw"].startswith("Created to fix")
+    assert block["raw"].startswith("Created with")
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +464,10 @@ def _cli(repo: Path, *args: str, fake: FakeOllama, monkeypatch: pytest.MonkeyPat
 def test_cli_ask_answers_from_real_repo_evidence(blind_spot_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeOllama(
         models=["m"],
-        reply="The sentinel was reverted because it broke docs [C3]. Probably also slow. Not in the evidence: who decided.",
+        reply=(
+            'The sentinel was reverted; the commit says "revert to 0, sentinel broke docs" [C3]. '
+            "Probably also slow. Not in the evidence: who decided."
+        ),
     )
     code, out, _ = _cli(
         blind_spot_repo,
@@ -400,8 +484,8 @@ def test_cli_ask_answers_from_real_repo_evidence(blind_spot_repo: Path, monkeypa
     assert code == 0
     assert "RETRIES = 0" in out and "Summary (inferred)" in out  # the normal report is intact
     assert "Question: Why is RETRIES 0?" in out
-    assert "The sentinel was reverted because it broke docs. [C3]" in out
-    assert "Removed 1 sentence that had no valid citation" in out and "- Probably also slow." in out
+    assert 'The sentinel was reverted; the commit says "revert to 0, sentinel broke docs". [C3]' in out
+    assert "Removed 1 sentence the evidence does not support" in out and "- Probably also slow." in out
     # the model only ever saw git evidence from this repo
     _, payload = fake.calls[-1]
     assert payload is not None and "C: revert to 0, sentinel broke docs" in payload["messages"][1]["content"]
@@ -424,7 +508,7 @@ def test_cli_ask_without_ollama_still_exits_zero(blind_spot_repo: Path, monkeypa
 
 
 def test_cli_ask_json(blind_spot_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeOllama(models=["m"], reply="Reverted to 0 [C3].")
+    fake = FakeOllama(models=["m"], reply='Commit C says "revert to 0, sentinel broke docs" [C3].')
     code, out, _ = _cli(
         blind_spot_repo, "cfg.py:2", "--ask", "why?", "--model", "m", "--json", fake=fake, monkeypatch=monkeypatch
     )

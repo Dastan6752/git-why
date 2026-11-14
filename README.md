@@ -234,17 +234,21 @@ unchanged). The answer is written by a model running **on your machine** via
 
 - The model sees a numbered *evidence pack* built from the report — commits
   `[C1]…`, pull requests `[P1]…`, issues `[I1]…`, review comments `[R1]…` — and
-  must cite an ID after every factual sentence.
-- Sentences without a valid citation are **removed and listed** under
-  "Removed … sentence(s) that had no valid citation", so you always see what
-  the model tried to claim without support.
-- If the evidence does not answer the question, the model has to say
-  `Not in the evidence: …` instead of guessing. The report still shows the
-  evidence it had.
-- The `Sources` list maps every cited ID to a commit or thread URL so claims can
-  be checked in one click. Citations are checked *mechanically* (the ID must
-  exist); whether a sentence faithfully reflects its source is for you to verify
-  — that is why the header says "check the sources".
+  every factual sentence must **quote the source verbatim** and cite its ID.
+- Two mechanical checks run on every sentence: the cited IDs must exist, and
+  each quoted phrase (3+ words) must actually occur in the cited source. A
+  sentence that fails is **removed and listed with the reason** (`no citation`,
+  `unknown citation [C42]`, `no verbatim quote`, `quote "…" not found in [R2]`),
+  so you always see what the model tried to claim. This is what catches a model
+  that cites a review comment while reversing what it said.
+- A reason may only be stated if the quoted text gives it as the reason; a
+  concern or suggestion in a comment is reported as what that person said, not
+  as the decision. If the evidence does not state why the current value was
+  chosen, the model must end with `Not in the evidence: …` instead of guessing.
+- The `Sources` list maps every cited ID to a commit or thread URL. The checks
+  prove the quote exists in the source; whether the surrounding sentence frames
+  it fairly is still for you to verify — that is why the header says "check the
+  sources".
 
 MVP limits: a single `FILE:LINE` target (ranges, `--function`, `--text` come
 later); add `--github` to include PR discussion as evidence.
@@ -283,15 +287,19 @@ to be a real model's output:
 ```
 Question: Why is RETRIES 0?
 AI answer (model example-model via local Ollama at http://127.0.0.1:11434; generated text - check the sources)
-  RETRIES was set to 0 when the config was created. [C1]
-  It was changed to a sentinel object to fix #42 and reverted to 0 because the sentinel broke the docs. [C2, C3]
-  Not in the evidence: why 0 rather than another number.
+  RETRIES was 0 when the file was created in commit "A: base config". [C1]
+  It was changed to a sentinel with the message "B: use sentinel" and "Fixes #42". [C2]
+  It went back to 0 in the commit "C: revert to 0, sentinel broke docs". [C3]
+  Not in the evidence: why 0 was chosen rather than another number.
   Sources
     [C1] 95eb10e "A: base config" (Test Author, 2023-11-14)
     [C2] 0b7178c "B: use sentinel" (Test Author, 2023-11-14)
     [C3] c2bc2db "C: revert to 0, sentinel broke docs" (Test Author, 2023-11-14)
-  Removed 1 sentence that had no valid citation (not shown as fact):
-    - The sentinel was probably slower as well.
+  Removed 2 sentences the evidence does not support (shown so nothing is hidden):
+    - The sentinel was chosen to avoid a magic number [C2].
+      reason: no verbatim quote from the cited source
+    - The reviewer said the sentinel "was too slow in practice" [C3].
+      reason: quote "was too slow in practice" not found in [C3]
 ```
 
 In JSON output the same information is under `"ask"` (`status`, `model`,

@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format follows
   compare them. Without Ollama the normal report is printed with short setup
   steps. Loopback-only by default (`GIT_WHY_ALLOW_REMOTE_MODEL=1` to override).
   JSON gains an `"ask"` block; the report schema is unchanged.
+- `--ask` sentences must also contain a **verbatim quote** from the cited
+  source, verified mechanically; sentences whose quote is missing or not found
+  in the source are removed and listed with the reason. Prompt rules added:
+  a reason may only be stated if the quoted text gives it; concerns in review
+  comments are not decisions; end with "Not in the evidence:" when the reason
+  is not stated. (Found by a real run that cited a comment while reversing it.)
 
 ## [0.1.1] - 2026-10-30
 

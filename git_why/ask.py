@@ -4,8 +4,12 @@
 Design rules (see README "Asking questions"):
 
 * The model sees the numbered evidence pack (:mod:`git_why.evidence`) and nothing else.
-* Every sentence that states a fact must cite ``[C1]``-style IDs from the pack.
-  Sentences without a valid citation are **removed and reported**, never hidden.
+* Every sentence that states a fact must cite ``[C1]``-style IDs from the pack
+  **and** contain a verbatim quote from the cited source. Both are checked
+  mechanically: an unknown ID, a missing quote, or a quote that does not occur
+  in the cited source removes the sentence — and the removal is reported with
+  its reason, never hidden. (This catches the classic failure of citing a
+  comment while reversing or embellishing what it says.)
 * If the evidence does not answer the question the model must say so with a
   sentence starting with ``Not in the evidence:`` — that sentence needs no citation.
 * Only a **local Ollama** server is supported, and only on a loopback address
@@ -48,14 +52,22 @@ class OllamaUnreachableError(Exception):
 SYSTEM_PROMPT = (
     "You answer one question about a single line of code using ONLY the numbered evidence provided.\n\n"
     "Rules:\n"
-    "1. Every sentence that states a fact must end with the IDs of the evidence that supports it, "
-    "in square brackets, e.g. [C2] or [C2][P1].\n"
+    "1. Every sentence that states a fact must (a) contain a short verbatim quote from the evidence in double "
+    "quotes - at least three consecutive words copied exactly - and (b) end with the IDs of the evidence the quote "
+    "comes from, in square brackets, e.g. [C2] or [C2][P1].\n"
     "2. Use only IDs that appear in the evidence. Never cite anything else.\n"
-    "3. If the evidence does not contain the answer, or only part of it, write one sentence that starts with "
-    '"Not in the evidence:" describing what is missing. That sentence needs no citation.\n'
-    "4. Do not guess motives, performance reasons, or intentions that are not written in the evidence. "
-    "Quoting a commit message or comment is good; paraphrasing it closely is fine.\n"
-    f"5. Be brief: at most {MAX_WORDS} words, plain prose, no headings or bullet points.\n"
+    "3. A reason may be stated ONLY if the quoted text itself gives it as the reason. A concern, question or "
+    "suggestion in a comment is not a decision: report it as what that person said, not as why the value was chosen. "
+    "Never turn 'X would be a problem' into 'X was chosen to avoid the problem'.\n"
+    "4. Do not add values, names, numbers or details that are not inside the evidence text you quote.\n"
+    "5. If the evidence does not state the reason for the current value, or only part of it, end with one sentence "
+    'that starts with "Not in the evidence:" saying exactly what is missing. '
+    "That sentence needs no quote or citation.\n"
+    f"6. Be brief: at most {MAX_WORDS} words, plain prose, no headings or bullet points.\n\n"
+    "Example of a correct answer (the evidence showed a reviewer worrying about a magic number and the value later "
+    "being set to 0 without a stated reason):\n"
+    'The PR discussion says that using 0 "will make it a magic number in this case" and considers a sentinel object '
+    "[R2]. Not in the evidence: why the final value was set back to 0.\n"
 )
 
 USER_TEMPLATE = """Question: {question}
@@ -63,7 +75,8 @@ USER_TEMPLATE = """Question: {question}
 Evidence:
 {evidence}
 
-Answer (cite IDs after each factual sentence; say "Not in the evidence:" for anything the evidence does not show):"""
+Answer (quote the evidence verbatim and cite IDs after each factual sentence; \
+say "Not in the evidence:" for anything the evidence does not state, especially the reason):"""
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +94,17 @@ class Sentence:
 
 
 @dataclass
+class Removed:
+    """A model sentence that did not pass the checks, with the reason it was removed."""
+
+    text: str
+    reason: str  # "no citation" | "unknown citation [X]" | "no verbatim quote" | "quote not found in [X]"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"text": self.text, "reason": self.reason}
+
+
+@dataclass
 class Answer:
     question: str
     # answered | insufficient_evidence | unavailable | no_model_selected
@@ -89,7 +113,7 @@ class Answer:
     model: str | None = None
     host: str = DEFAULT_HOST
     sentences: list[Sentence] = field(default_factory=list)
-    removed: list[str] = field(default_factory=list)  # sentences dropped for lacking valid citations
+    removed: list[Removed] = field(default_factory=list)  # sentences that failed the checks (always shown)
     message: str = ""  # one-line explanation for non-answered states
     setup: list[str] = field(default_factory=list)  # short, explicit next steps
     note: str = ""  # e.g. "using the only installed model"
@@ -117,7 +141,7 @@ class Answer:
             "text": self.text or None,
             "sentences": [s.to_dict() for s in self.sentences],
             "sources": [i.to_dict() for i in self.sources],
-            "removed_uncited": list(self.removed),
+            "removed": [r.to_dict() for r in self.removed],
             "message": self.message or None,
             "setup": list(self.setup),
             "note": self.note or None,
@@ -251,21 +275,47 @@ def setup_steps(target: str, question: str, installed: list[str] | None = None) 
 
 _CITE = re.compile(r"\[([A-Z]\d+(?:\s*,\s*[A-Z]\d+)*)\]")
 _SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])|\n+")
+_QUOTE = re.compile(r"[\"\u201c\u201d]([^\"\u201c\u201d]{3,}?)[\"\u201c\u201d]")
+_NORM = re.compile(r"[^a-z0-9 ]+")
+MIN_QUOTE_WORDS = 3
 
 
 def split_sentences(text: str) -> list[str]:
     text = " ".join(text.strip().split("\n\n"))
-    return [s.strip() for s in _SPLIT.split(text) if s and s.strip()]
+    # keep sentence breaks out of quoted spans: temporarily protect ". " inside quotes
+    protected = re.sub(_QUOTE, lambda m: m.group(0).replace(". ", ".\x00"), text)
+    parts = [p.replace("\x00", " ") for p in _SPLIT.split(protected)]
+    return [p.strip() for p in parts if p and p.strip()]
 
 
-def validate(raw: str, pack: EvidencePack) -> tuple[list[Sentence], list[str]]:
-    """Keep sentences whose citations all exist; report the rest. Nothing is silently dropped."""
+def normalise(text: str) -> str:
+    """Lower-case, drop punctuation/markup, collapse whitespace - the same on both sides of a quote check."""
+    text = text.lower().replace("`", " ").replace("\u2019", "'").replace("'", "")
+    return " ".join(_NORM.sub(" ", text).split())
+
+
+def quotes_in(sentence: str) -> list[str]:
+    return [q.strip() for q in _QUOTE.findall(sentence) if len(q.split()) >= MIN_QUOTE_WORDS]
+
+
+def quote_supported(quote: str, items: list[Item]) -> bool:
+    needle = normalise(quote)
+    return bool(needle) and any(needle in normalise(item.text) for item in items)
+
+
+def validate(raw: str, pack: EvidencePack) -> tuple[list[Sentence], list[Removed]]:
+    """
+    Keep a sentence only if it is a "Not in the evidence:" statement, or it cites
+    known IDs *and* every quote it contains occurs in one of the cited sources.
+    Everything else is returned in ``removed`` with the reason. Nothing is silently dropped.
+    """
     kept: list[Sentence] = []
-    removed: list[str] = []
+    removed: list[Removed] = []
     for sentence in split_sentences(raw):
         ids: list[str] = []
         for m in _CITE.finditer(sentence):
             ids += [p.strip() for p in m.group(1).split(",")]
+        ids = list(dict.fromkeys(ids))
         clean = _CITE.sub("", sentence).strip()
         clean = re.sub(r"\s+([.,;:])", r"\1", clean)
         if not clean:
@@ -273,10 +323,23 @@ def validate(raw: str, pack: EvidencePack) -> tuple[list[Sentence], list[str]]:
         if clean.lower().startswith(INSUFFICIENT_PREFIX):
             kept.append(Sentence(clean, []))
             continue
-        if ids and all(i in pack.ids for i in ids):
-            kept.append(Sentence(clean, list(dict.fromkeys(ids))))
-        else:
-            removed.append(sentence.strip())
+        if not ids:
+            removed.append(Removed(sentence.strip(), "no citation"))
+            continue
+        unknown = [i for i in ids if i not in pack.ids]
+        if unknown:
+            removed.append(Removed(sentence.strip(), f"unknown citation [{', '.join(unknown)}]"))
+            continue
+        quotes = quotes_in(clean)
+        if not quotes:
+            removed.append(Removed(sentence.strip(), "no verbatim quote from the cited source"))
+            continue
+        sources = [item for i in ids if (item := pack.get(i)) is not None]
+        bad = [q for q in quotes if not quote_supported(q, sources)]
+        if bad:
+            removed.append(Removed(sentence.strip(), f'quote "{bad[0]}" not found in [{", ".join(ids)}]'))
+            continue
+        kept.append(Sentence(clean, ids))
     return kept, removed
 
 
@@ -350,5 +413,7 @@ def ask(
     has_fact = any(s.citations for s in answer.sentences)
     answer.status = "answered" if has_fact else "insufficient_evidence"
     if not answer.sentences:
-        answer.message = "the model produced no sentence with a valid citation; the evidence may not answer this"
+        answer.message = (
+            "the model produced no sentence that quotes and cites the evidence; the evidence may not answer this"
+        )
     return answer

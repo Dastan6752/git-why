@@ -301,9 +301,10 @@ def _plain_answer(answer: Answer, w: Callable[[str], Any]) -> None:
             w(f"    [{item.id}] {item.label}" + (f"  {item.url}" if item.url else "") + "\n")
     if answer.removed:
         n = len(answer.removed)
-        w(f"  Removed {n} sentence{'s' if n != 1 else ''} that had no valid citation (not shown as fact):\n")
+        plural = "s" if n != 1 else ""
+        w(f"  Removed {n} sentence{plural} the evidence does not support (shown so nothing is hidden):\n")
         for r in answer.removed:
-            w(f"    - {r}\n")
+            w(f"    - {r.text}\n      reason: {r.reason}\n")
     if answer.setup:
         w("  The Git evidence above is complete without AI. To get answers:\n")
         for step in answer.setup:
@@ -330,9 +331,11 @@ def _rich_answer(answer: Answer, p) -> None:  # type: ignore[no-untyped-def]
     if answer.removed:
         n = len(answer.removed)
         plural = "s" if n != 1 else ""
-        p(f"    [yellow]Removed {n} sentence{plural} that had no valid citation (not shown as fact):[/yellow]")
+        head = f"Removed {n} sentence{plural} the evidence does not support (shown so nothing is hidden):"
+        p(f"    [yellow]{head}[/yellow]")
         for r in answer.removed:
-            p(f"      [dim]- {escape(r)}[/dim]")
+            p(f"      [dim]- {escape(r.text)}[/dim]")
+            p(f"        [dim]reason: {escape(r.reason)}[/dim]")
     if answer.setup:
         p("    [dim]The Git evidence above is complete without AI. To get answers:[/dim]")
         for step in answer.setup:
