@@ -118,10 +118,17 @@ class Fallback:
     comment, quoted exactly, so the user still gets the best evidence with a link."""
 
     item: Item
-    quote: str
+    quote: str  # the single most relevant sentence, exactly as written
+    full: str = ""  # the whole comment text, for JSON / auditing
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.item.id, "label": self.item.label, "url": self.item.url, "quote": self.quote}
+        return {
+            "id": self.item.id,
+            "label": self.item.label,
+            "url": self.item.url,
+            "quote": self.quote,
+            "full": self.full or self.quote,
+        }
 
 
 NO_DECISION = "The evidence does not explain the final decision."
@@ -528,4 +535,13 @@ def most_relevant_comment(pack: EvidencePack, question: str, removed: list[Remov
         return (len(wanted & _tokens(item.text)), 1 if item.id in pointed_at else 0)
 
     best = max(candidates, key=score)  # max() keeps the first of equal scores
-    return Fallback(best, best.quote or best.text)
+    full = best.quote or best.text
+    return Fallback(best, most_relevant_sentence(full, wanted), full)
+
+
+def most_relevant_sentence(text: str, wanted: set[str]) -> str:
+    """The sentence of ``text`` sharing the most words with ``wanted`` (first wins ties); whole text if unsplittable."""
+    sentences = split_sentences(text)
+    if len(sentences) <= 1:
+        return text.strip()
+    return max(sentences, key=lambda sent: len(wanted & _tokens(sent)))

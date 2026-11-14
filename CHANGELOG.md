@@ -33,6 +33,8 @@ All notable changes to this project are documented here. The format follows
   "The evidence does not explain the final decision." Removed sentences are
   now counted in normal output and listed only with `--show-removed` or in
   JSON (`removed`, plus new `fallback`). Evidence items carry `quote`.
+- The fallback quote is the single most relevant exact sentence of that
+  comment (not the whole comment); the full text stays in JSON `fallback.full`.
 
 ## [0.1.1] - 2026-10-30
 

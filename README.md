@@ -257,9 +257,11 @@ unchanged). The answer is written by a model running **on your machine** via
   value was chosen, the model must end with `Not in the evidence: …`.
 - When **no factual sentence survives**, the answer does not go blank: it shows
   the single most relevant comment from the evidence as an **exact quote with
-  its link** (chosen by overlap with your question and with whatever the model
-  tried to quote), followed by "The evidence does not explain the final
-  decision." — so you still get the best evidence, in the author's own words.
+  its link** — the comment and, within it, the one sentence that best matches
+  your question and whatever the model tried to quote — followed by "The
+  evidence does not explain the final decision." You still get the best
+  evidence, in the author's own words; `--json` has the full comment under
+  `fallback.full`.
 - The `Sources` list maps every cited ID to a commit or thread URL. The checks
   prove the quote exists in the source; whether the surrounding sentence frames
   it fairly is still for you to verify — that is why the header says "check the
@@ -331,7 +333,7 @@ same evidence; the link is a placeholder in the fixture):
 Question: Why is DEFAULT_RETRIES 0?
 AI answer (model llama3.2): the gathered evidence does not answer this question
   Most relevant comment in the evidence (exact quote) [R2]:
-    "I realize that using `0` will make it a magic number in this case. Perhaps on the sentinel object we set a `value`, e.g.,"
+    "I realize that using `0` will make it a magic number in this case."
     - @sigmavirus24 (review comment) on PR #2216  https://example.invalid/pull/2216#r2
   The evidence does not explain the final decision.
   Not in the evidence: why the final value was set back to 0.

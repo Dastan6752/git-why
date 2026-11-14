@@ -338,8 +338,7 @@ def test_regression_llama32_when_only_the_false_reason_is_produced(
     assert out.splitlines()[1:7] == [
         "AI answer (model llama3.2): the gathered evidence does not answer this question",
         "  Most relevant comment in the evidence (exact quote) [R2]:",
-        '    "I realize that using `0` will make it a magic number in this case. '
-        'Perhaps on the sentinel object we set a `value`, e.g.,"',
+        '    "I realize that using `0` will make it a magic number in this case."',
         "    - @sigmavirus24 (review comment) on PR #2216  https://example.invalid/pull/2216#r2",
         "  The evidence does not explain the final decision.",
         "  Not in the evidence: why the final value was set back to 0.",
@@ -348,6 +347,7 @@ def test_regression_llama32_when_only_the_false_reason_is_produced(
     assert "Removed 1 generated sentence" in out and "reason:" not in out
     # JSON keeps the full audit trail
     assert answer.to_dict()["fallback"]["url"] == "https://example.invalid/pull/2216#r2"
+    assert answer.to_dict()["fallback"]["full"].endswith("we set a `value`, e.g.,")
     assert answer.to_dict()["removed"][0]["reason"].startswith("states a reason, but the quoted source")
 
 
@@ -358,6 +358,40 @@ def test_fallback_picks_the_comment_matching_question_and_attempted_quotes(monke
     # with no hint at all, the question decides; "merge" matches R1
     a = _ask_with_pack("No idea.", monkeypatch, question="When will this merge after CI?")
     assert a.fallback is not None and a.fallback.item.id == "R1"
+
+
+def test_fallback_quote_is_shortened_to_the_most_relevant_exact_sentence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: the fallback used to print the whole comment; only the sentence that matters is shown."""
+    raw = 'The reason for setting DEFAULT_RETRIES to 0 is that using 0 "will make it a magic number" [R2].'
+    answer = _ask_with_pack(raw, monkeypatch)
+    assert answer.fallback is not None
+    assert answer.fallback.quote == "I realize that using `0` will make it a magic number in this case."
+    assert answer.fallback.full.startswith(answer.fallback.quote) and "Perhaps" in answer.fallback.full
+    # the sentence is exact: it occurs verbatim in the evidence the model saw
+    assert answer.fallback.quote in answer.pack.get("R2").text
+    # the "Not in the evidence" conclusion and the link stay
+    buf = io.StringIO()
+    render_plain(sample_report(_tmp_dir()), out=buf, answer=answer)
+    out = buf.getvalue()
+    assert '    "I realize that using `0` will make it a magic number in this case."\n' in out
+    assert "Perhaps on the sentinel" not in out
+    assert "https://example.invalid/pull/2216#r2" in out and "The evidence does not explain the final decision." in out
+
+
+def test_most_relevant_sentence_follows_the_question_and_keeps_single_sentences() -> None:
+    from git_why.ask import _tokens, most_relevant_sentence
+
+    text = "First we tried a sentinel. The docs build broke with it. So we went back to zero."
+    assert most_relevant_sentence(text, _tokens("why did the docs break?")) == "The docs build broke with it."
+    assert most_relevant_sentence(text, _tokens("zero?")) == "So we went back to zero."
+    assert most_relevant_sentence(text, set()) == "First we tried a sentinel."  # tie -> first sentence
+    assert most_relevant_sentence("Only one sentence here", _tokens("anything")) == "Only one sentence here"
+
+
+def _tmp_dir() -> Path:
+    import tempfile
+
+    return Path(tempfile.mkdtemp())
 
 
 def test_fallback_is_none_without_comments_or_threads(monkeypatch: pytest.MonkeyPatch) -> None:
