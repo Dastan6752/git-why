@@ -34,6 +34,13 @@ class Target:
     lines: list[str]  # content at HEAD
     function: str | None = None
     text: str | None = None  # when tracing a line by text instead of number
+    # The enclosing block at HEAD (for --ask code questions). Not part of the JSON report.
+    context_start: int = 0  # 1-based line number of context[0]; 0 = no context
+    context: list[str] = field(default_factory=list)
+
+    @property
+    def context_end(self) -> int:
+        return self.context_start + len(self.context) - 1 if self.context else 0
 
     @property
     def label(self) -> str:

@@ -93,6 +93,7 @@ def investigate(path: Path, start: int | None, end: int | None, opts: Options) -
                 hint="line numbers refer to the committed file (HEAD)",
             )
         target = Target(rel, start, end, file_lines[start - 1 : end])
+        target.context_start, target.context = functions.enclosing_block(content or "", start, end)
         steps = history.line_history(repo.root, rel, start, end)
         walk_texts = target.lines if len(target.lines) <= MAX_PICKAXE_LINES else []
         trim = True
@@ -209,6 +210,7 @@ def _function_target(
     match = matches[0]
     start, end = functions.function_extent(content, match.line)
     target = Target(rel, start, end, file_lines[start - 1 : end], function=name)
+    target.context_start, target.context = functions.enclosing_block(content, start, end)
 
     driver = functions.diff_driver_for(rel)
     note: str | None = None

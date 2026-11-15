@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import IO
+from collections.abc import Callable
+from typing import IO, Any
 
 from rich.console import Console
 from rich.markup import escape
 
+from .ask import MODE_LABEL, Answer, closing_line
 from .history import Step
 from .report import Report
 
@@ -42,9 +44,12 @@ def _noun(report: Report) -> str:
 # ---------------------------------------------------------------------------
 
 
-def render_json(report: Report, out: IO[str] | None = None) -> None:
+def render_json(report: Report, out: IO[str] | None = None, *, answer: Answer | None = None) -> None:
     out = out or sys.stdout
-    json.dump(report.to_dict(), out, indent=2, ensure_ascii=True)
+    data = report.to_dict()
+    if answer is not None:
+        data["ask"] = answer.to_dict()
+    json.dump(data, out, indent=2, ensure_ascii=True)
     out.write("\n")
 
 
@@ -53,7 +58,15 @@ def render_json(report: Report, out: IO[str] | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def render_rich(report: Report, *, color: bool | None = None, max_body: int = 6, out: IO[str] | None = None) -> None:
+def render_rich(
+    report: Report,
+    *,
+    color: bool | None = None,
+    max_body: int = 6,
+    out: IO[str] | None = None,
+    answer: Answer | None = None,
+    show_removed: bool = False,
+) -> None:
     out = out or sys.stdout
     console = Console(
         file=out, force_terminal=color if color is not None else None, no_color=color is False, soft_wrap=True
@@ -90,6 +103,8 @@ def render_rich(report: Report, *, color: bool | None = None, max_body: int = 6,
         p(f"    [dim]- {escape(reason)}[/dim]")
     for w in report.warnings + report.github.warnings:
         p(f"  [yellow]warning:[/yellow] {escape(w)}")
+    if answer is not None:
+        _rich_answer(answer, p, show_removed)
     p()
 
 
@@ -179,7 +194,14 @@ def _rich_thread(thread, p) -> None:  # type: ignore[no-untyped-def]
 # ---------------------------------------------------------------------------
 
 
-def render_plain(report: Report, *, max_body: int = 6, out: IO[str] | None = None) -> None:
+def render_plain(
+    report: Report,
+    *,
+    max_body: int = 6,
+    out: IO[str] | None = None,
+    answer: Answer | None = None,
+    show_removed: bool = False,
+) -> None:
     out = out or sys.stdout
     w = out.write
     w(f"{report.target.label}\n")
@@ -249,3 +271,102 @@ def render_plain(report: Report, *, max_body: int = 6, out: IO[str] | None = Non
         w(f"  - {reason}\n")
     for warning in report.warnings + report.github.warnings:
         w(f"warning: {warning}\n")
+    if answer is not None:
+        _plain_answer(answer, w, show_removed)
+
+
+# ---------------------------------------------------------------------------
+# --ask section (always last, always the same shape)
+# ---------------------------------------------------------------------------
+
+
+def _answer_headline(answer: Answer) -> str:
+    if answer.status == "answered":
+        return f"AI answer (model {answer.model} via local Ollama at {answer.host}; generated text - check the sources)"
+    if answer.status == "insufficient_evidence":
+        return f"AI answer (model {answer.model}): the gathered evidence does not answer this question"
+    if answer.status == "no_model_selected":
+        return "AI answer: no model selected"
+    return "AI answer: unavailable"
+
+
+def _removed_headline(answer: Answer, show_removed: bool) -> str:
+    n = len(answer.removed)
+    plural = "s" if n != 1 else ""
+    if show_removed:
+        return f"Removed {n} sentence{plural} the evidence does not support:"
+    return (
+        f"Removed {n} generated sentence{plural} the evidence does not support (--show-removed or --json lists them)."
+    )
+
+
+def _plain_answer(answer: Answer, w: Callable[[str], Any], show_removed: bool = False) -> None:
+    w("\n")
+    w(f"Question: {answer.question}\n")
+    w(_answer_headline(answer) + "\n")
+    w(f"  question type: {MODE_LABEL.get(answer.mode, answer.mode)}\n")
+    if answer.note:
+        w(f"  note: {answer.note}\n")
+    if answer.message:
+        w(f"  {answer.message}\n")
+    if answer.fallback:
+        fb = answer.fallback
+        kind = "code" if fb.item.kind == "code" else "comment"
+        w(f"  Most relevant {kind} in the evidence (exact quote) [{fb.item.id}]:\n")
+        w(f'    "{fb.quote}"\n')
+        w(f"    - {fb.item.label}" + (f"  {fb.item.url}" if fb.item.url else "") + "\n")
+        w(f"  {closing_line(answer.mode)}\n")
+    for s in answer.sentences:
+        cite = f" [{', '.join(s.citations)}]" if s.citations else ""
+        w(f"  {s.text}{cite}\n")
+    if answer.sources:
+        w("  Sources\n")
+        for item in answer.sources:
+            w(f"    [{item.id}] {item.label}" + (f"  {item.url}" if item.url else "") + "\n")
+    if answer.removed:
+        w(f"  {_removed_headline(answer, show_removed)}\n")
+        if show_removed:
+            for r in answer.removed:
+                w(f"    - {r.text}\n      reason: {r.reason}\n")
+    if answer.setup:
+        w("  The Git evidence above is complete without AI. To get answers:\n")
+        for step in answer.setup:
+            w(f"    {step}\n")
+
+
+def _rich_answer(answer: Answer, p, show_removed: bool = False) -> None:  # type: ignore[no-untyped-def]
+    p()
+    p(f"  [bold]Question:[/bold] {escape(answer.question)}")
+    colour = {"answered": "green", "insufficient_evidence": "yellow"}.get(answer.status, "yellow")
+    p(f"  [bold {colour}]{escape(_answer_headline(answer))}[/bold {colour}]")
+    p(f"    [dim]question type: {MODE_LABEL.get(answer.mode, answer.mode)}[/dim]")
+    if answer.note:
+        p(f"    [dim]note: {escape(answer.note)}[/dim]")
+    if answer.message:
+        p(f"    {escape(answer.message)}")
+    if answer.fallback:
+        fb = answer.fallback
+        kind = "code" if fb.item.kind == "code" else "comment"
+        p(f"    Most relevant {kind} in the evidence (exact quote) [magenta]\\[{fb.item.id}][/magenta]:")
+        p(f'      [italic]"{escape(fb.quote)}"[/italic]')
+        url = f"  [dim]{escape(fb.item.url)}[/dim]" if fb.item.url else ""
+        p(f"      - {escape(fb.item.label)}{url}")
+        p(f"    [bold]{closing_line(answer.mode)}[/bold]")
+    for s in answer.sentences:
+        cite = f" [magenta]\\[{', '.join(s.citations)}][/magenta]" if s.citations else ""
+        p(f"    {escape(s.text)}{cite}")
+    if answer.sources:
+        p("    [bold]Sources[/bold]")
+        for item in answer.sources:
+            url = f"  [dim]{escape(item.url)}[/dim]" if item.url else ""
+            p(f"      [magenta]\\[{item.id}][/magenta] {escape(item.label)}{url}")
+    if answer.removed:
+        p(f"    [yellow]{escape(_removed_headline(answer, show_removed))}[/yellow]")
+        if show_removed:
+            for r in answer.removed:
+                p(f"      [dim]- {escape(r.text)}[/dim]")
+                p(f"        [dim]reason: {escape(r.reason)}[/dim]")
+    if answer.setup:
+        p("    [dim]The Git evidence above is complete without AI. To get answers:[/dim]")
+        for step in answer.setup:
+            p(f"      {escape(step)}")

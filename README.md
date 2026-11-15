@@ -141,6 +141,9 @@ Options
   -g, --github            fetch linked issues / PRs / review comments
       --github-repo O/N   use this GitHub repository instead of the origin remote
   -m, --merges            inspect merge commits for edits made during conflict resolution
+      --ask QUESTION      answer a question about the line from the evidence (local Ollama model)
+      --model NAME        Ollama model for --ask (or GIT_WHY_MODEL); no default
+      --show-removed      with --ask: list generated sentences that failed the evidence checks
   -F, --format FORMAT     auto (default) | rich | plain | json
       --json              shortcut for --format json
   -a, --all               do not dim formatting / move commits
@@ -221,6 +224,180 @@ git why src/app.py:42 --github
 - Rate limits, 401/403/404, server errors, malformed responses and network
   failures degrade to a warning; the local report is always produced and the
   exit code is unaffected.
+
+## Asking questions: `--ask`
+
+```
+git why src/app.py:42 --ask "Why is this timeout set to 30?"
+```
+
+`--ask` adds one section at the **end** of the normal report (which is printed
+unchanged). The answer is written by a model running **on your machine** via
+[Ollama](https://ollama.com), from the evidence in the report and nothing else:
+
+- `--ask` answers **two kinds of question**, and tells you which one it
+  detected (`question type: …` under the headline):
+  - **history** — *why / when / who / what changed* (`Why is this 30?`,
+    `Which PR introduced this?`, `What is the purpose of this line?`). The
+    evidence is commits `[C1]…`, pull requests `[P1]…`, issues `[I1]…`, review
+    comments `[R1]…`, plus the current line `[S1]` last.
+  - **code explanation** — everything else (`What does this line do?`,
+    `How does this work?`, `Explain this`). The evidence starts with the
+    **source code at HEAD**: `[S1]` the line itself and `[S2]` its enclosing
+    function or block (at most 40 lines), followed by the same commits. The
+    model is told to describe only behaviour it can read in the quoted code and
+    never to say when, why or by whom it was written unless it quotes a commit
+    or discussion that says so.
+- In both modes every factual sentence must **quote the source verbatim** and
+  cite its ID. Code may be quoted in backticks (`` `sys.exit(code)` ``); a whole
+  line of cited code counts as a quote even when it is short.
+- Two mechanical checks run on every sentence: the cited IDs must exist, and
+  each quoted phrase (3+ words) must actually occur in the cited source. A
+  sentence that fails is **removed**; the normal output tells you how many were
+  removed, and `--show-removed` (or `--json`) lists each one with its reason
+  (`no citation`, `unknown citation [C42]`, `no verbatim quote`,
+  `quote "…" not found in [R2]`, `states a reason, but the quoted source only
+  raises a concern…`). Nothing is dropped silently. This is what catches a model
+  that cites a review comment while reversing what it said.
+- A third check targets *reasons*. If a sentence presents something as *why*
+  ("the reason is…", "because…", "was set to … to avoid…"), its quote must
+  itself state a reason (because / to fix / so that / broke …) and contain no
+  hedging (would / will make / perhaps / a question). A reviewer's warning that
+  a value "will make it a magic number" can be reported as what the reviewer
+  said, but never as the reason the value was chosen — the sentence is removed
+  with `states a reason, but the quoted source only raises a concern…`.
+- A sentence that cites **only source code** (`[S1]`/`[S2]`) may describe
+  behaviour in the present tense, but any historical claim in it — *was added*,
+  *was already present*, *has been here since*, *still*, *unchanged*, *reviewer*,
+  *commit*, *in 2014*, *issue #12* — is removed with `historical claim cited to
+  source code, not to a commit or discussion`. Code shows what a line does,
+  never when or why it got there.
+- A **history** answer counts as answered only if at least one kept sentence
+  cites a commit, PR, issue or review comment. If none does and the model did
+  not say so itself, git-why appends `Not in the evidence: the commits and
+  discussions gathered do not say why this line was added.` (marked
+  `added_by_git_why` in JSON) and the headline says the evidence does not
+  answer the question.
+- A reason claim and `Not in the evidence:` cannot both stand for the same
+  question: if the model writes both, the reason claim is removed and the
+  cautious sentence is kept. If the evidence does not state why the current
+  value was chosen, the model must end with `Not in the evidence: …`.
+- When **no factual sentence survives**, the answer does not go blank: it shows
+  the single most relevant comment from the evidence as an **exact quote with
+  its link** — the comment and, within it, the one sentence that best matches
+  your question and whatever the model tried to quote — followed by "The
+  evidence does not explain the final decision." You still get the best
+  evidence, in the author's own words; `--json` has the full comment under
+  `fallback.full`.
+- The `Sources` list maps every cited ID to a commit or thread URL. The checks
+  prove the quote exists in the source; whether the surrounding sentence frames
+  it fairly is still for you to verify — that is why the header says "check the
+  sources".
+
+MVP limits: a single `FILE:LINE` target (ranges, `--function`, `--text` come
+later); add `--github` to include PR discussion as evidence. The question type
+is detected from the wording (any *why/when/who/changed/PR/purpose…* word means
+history); if it guesses wrong, rephrase — e.g. "What does this do?" for code,
+"Why is this here?" for history.
+
+### Setup (once)
+
+1. Install Ollama from <https://ollama.com/download> and start it.
+2. Download a model: `ollama pull llama3.2` (≈2 GB) or `ollama pull qwen2.5:7b` (≈5 GB).
+3. Run `git why FILE:LINE --ask "…" --model <name>`.
+
+There is **no default model**. If exactly one model is installed it is used and
+named in the output; if several are installed, git-why lists them and asks you
+to pick with `--model`. To settle on a default for your machine, run the same
+question once per model and compare how many sentences survive with valid
+citations, then `export GIT_WHY_MODEL=<name>`.
+
+Without Ollama the command still works — the history report is complete and the
+answer section explains what to install (real output from a machine without
+Ollama):
+
+```
+Question: Why does this line exist?
+AI answer: unavailable
+  Ollama is not running at http://127.0.0.1:11434 ([Errno 111] Connection refused)
+  The Git evidence above is complete without AI. To get answers:
+    1. Install Ollama (local, free): https://ollama.com/download - then start it.
+    2. Download a model, e.g.  ollama pull llama3.2   or   ollama pull qwen2.5:7b
+    3. Run:  git why README.md:1 --ask "Why does this line exist?" --model llama3.2
+    To choose a default for your machine: run the same question once per model and compare how many sentences survive with valid citations (shown below each answer); then set GIT_WHY_MODEL=<name>.
+```
+
+Layout of an answer. This was produced by the test suite with a **scripted
+model reply** on its fixture repository, to show the shape without pretending
+to be a real model's output:
+
+```
+Question: Why is RETRIES 0?
+AI answer (model example-model via local Ollama at http://127.0.0.1:11434; generated text - check the sources)
+  RETRIES was 0 when the file was created in commit "A: base config". [C1]
+  It was changed to a sentinel with the message "B: use sentinel" and "Fixes #42". [C2]
+  It went back to 0 in the commit "C: revert to 0, sentinel broke docs". [C3]
+  Not in the evidence: why 0 was chosen rather than another number.
+  Sources
+    [C1] 95eb10e "A: base config" (Test Author, 2023-11-14)
+    [C2] 0b7178c "B: use sentinel" (Test Author, 2023-11-14)
+    [C3] c2bc2db "C: revert to 0, sentinel broke docs" (Test Author, 2023-11-14)
+  Removed 2 generated sentences the evidence does not support (--show-removed or --json lists them).
+```
+
+With `--show-removed` the last line expands to the audit list:
+
+```
+  Removed 2 sentences the evidence does not support:
+    - The sentinel was chosen to avoid a magic number [C2].
+      reason: no verbatim quote from the cited source
+    - The reviewer said the sentinel "was too slow in practice" [C3].
+      reason: quote "was too slow in practice" not found in [C3]
+```
+
+And when every factual sentence fails the checks (this reproduces a real
+`llama3.2` answer on `psf/requests`, replayed through the test suite against the
+same evidence; the link is a placeholder in the fixture):
+
+```
+Question: Why is DEFAULT_RETRIES 0?
+AI answer (model llama3.2): the gathered evidence does not answer this question
+  Most relevant comment in the evidence (exact quote) [R2]:
+    "I realize that using `0` will make it a magic number in this case."
+    - @sigmavirus24 (review comment) on PR #2216  https://example.invalid/pull/2216#r2
+  The evidence does not explain the final decision.
+  Not in the evidence: why the final value was set back to 0.
+  Removed 1 generated sentence the evidence does not support (--show-removed or --json lists them).
+```
+
+A code-explanation question, run on this repository's own `git_why/cli.py:81`
+with a **scripted model reply** (again produced by the test suite, not a real
+model): the two sentences grounded in the code survive, a sentence claiming why
+the helper "was added" is removed because nothing in the evidence says so.
+
+```
+Question: What does this line do?
+AI answer (model example-model via local Ollama at http://127.0.0.1:11434; generated text - check the sources)
+  question type: code explanation
+  The line calls `typer.secho(f"error: {message}", fg="red", err=True)`, which prints the message in red to stderr. [S1]
+  It is the first statement of `def _fail(message: str, code: int, hint: str | None = None) -> None:` and the function ends with `raise typer.Exit(code)`. [S2]
+  Not in the evidence: which commands call _fail.
+  Sources
+    [S1] git_why/cli.py:81 (HEAD)
+    [S2] git_why/cli.py lines 80-84 (HEAD)
+  Removed 1 generated sentence the evidence does not support (--show-removed or --json lists them).
+```
+
+In JSON output the same information is under `"ask"` (`mode`, `status`, `model`,
+`sentences` with `citations`, `sources`, `removed` with reasons, `fallback`,
+`setup`, the `evidence` pack and the `raw` model text).
+
+### Privacy
+
+Nothing is sent anywhere unless you pass `--ask`, and then only to Ollama on
+**localhost** (`http://127.0.0.1:11434`, or `OLLAMA_HOST` if it points at a
+loopback address). A non-local `OLLAMA_HOST` is refused unless you set
+`GIT_WHY_ALLOW_REMOTE_MODEL=1`. There is no cloud provider in this release.
 
 ## How it works
 

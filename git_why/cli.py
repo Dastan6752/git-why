@@ -21,6 +21,7 @@ from pathlib import Path
 import typer
 
 from . import __version__
+from .ask import OllamaClient, ask
 from .core import EXIT_GIT, EXIT_NO_HISTORY, EXIT_USAGE, Options, UserError, investigate
 from .history import GitError
 from .render import render_json, render_plain, render_rich
@@ -41,6 +42,7 @@ EXAMPLES = (
     "  git why src/app.py:42 --merges             include edits made by merges\n\n"
     "  git why src/app.py --text 'TIMEOUT = 30'   a line that no longer exists\n\n"
     "  git why src/app.py:42 --json               machine-readable output\n\n"
+    "  git why src/app.py:42 --ask 'why 30?'      answer, cited from the evidence\n\n"
     "Set GITHUB_TOKEN (or GH_TOKEN) to raise the GitHub API rate limit and reach private repos. "
     "Exit codes: 0 ok, 1 usage error, 2 git error, 3 no history found."
 )
@@ -102,6 +104,18 @@ def main(
     merges: bool = typer.Option(
         False, "--merges", "-m", help="Also inspect merge commits for changes made during conflict resolution"
     ),
+    question: str | None = typer.Option(
+        None,
+        "--ask",
+        help="Ask a question about the line; answered only from the evidence above by a local Ollama model",
+        metavar="QUESTION",
+    ),
+    model: str | None = typer.Option(
+        None, "--model", help="Ollama model for --ask (no default; see --ask output)", envvar="GIT_WHY_MODEL"
+    ),
+    show_removed: bool = typer.Option(
+        False, "--show-removed", help="With --ask: list the generated sentences that failed the evidence checks"
+    ),
     fmt: str = typer.Option("auto", "--format", "-F", help="auto | rich | plain | json", metavar="FORMAT"),
     json_flag: bool = typer.Option(False, "--json", help="Shortcut for --format json"),
     show_all: bool = typer.Option(False, "--all", "-a", help="Do not classify formatting/move commits as noise"),
@@ -128,6 +142,15 @@ def main(
         )
     if github_repo and not re.fullmatch(r"[\w.-]+/[\w.-]+", github_repo):
         _fail("--github-repo must look like OWNER/NAME", EXIT_USAGE)
+    if question is not None:
+        if not question.strip():
+            _fail("--ask needs a question, e.g. --ask 'why is this timeout 30?'", EXIT_USAGE)
+        if function or text or start is None or start != end:
+            _fail(
+                "--ask currently supports a single FILE:LINE target",
+                EXIT_USAGE,
+                hint="run the same question on one line, e.g. src/app.py:42 --ask '...'",
+            )
 
     output = "json" if json_flag else fmt
     if output not in ("auto", "rich", "plain", "json"):
@@ -155,12 +178,18 @@ def main(
         _fail(f"git failed: {exc}", EXIT_GIT)
         return  # pragma: no cover
 
+    answer = None
+    if question is not None and report.steps:
+        answer = ask(report, question.strip(), model=model, client_factory=OllamaClient)
+
     if output == "json":
-        render_json(report)
+        render_json(report, answer=answer)
     elif output == "plain":
-        render_plain(report, max_body=max_body)
+        render_plain(report, max_body=max_body, answer=answer, show_removed=show_removed)
     else:
-        render_rich(report, color=False if no_color else None, max_body=max_body)
+        render_rich(
+            report, color=False if no_color else None, max_body=max_body, answer=answer, show_removed=show_removed
+        )
 
     if not report.steps:
         typer.secho("no history found for this target", fg="yellow", err=True)

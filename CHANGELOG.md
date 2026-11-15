@@ -6,12 +6,62 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `--ask QUESTION` (single `FILE:LINE` target): answers from the report's own
+  evidence using a **local Ollama model**. Every factual sentence must cite a
+  commit / PR / issue / comment ID from the evidence pack; sentences without a
+  valid citation are removed *and listed*; missing evidence is reported as
+  "Not in the evidence". No default model — `--model` / `GIT_WHY_MODEL`, or the
+  only installed model; otherwise the output lists installed models and how to
+  compare them. Without Ollama the normal report is printed with short setup
+  steps. Loopback-only by default (`GIT_WHY_ALLOW_REMOTE_MODEL=1` to override).
+  JSON gains an `"ask"` block; the report schema is unchanged.
+- `--ask` sentences must also contain a **verbatim quote** from the cited
+  source, verified mechanically; sentences whose quote is missing or not found
+  in the source are removed and listed with the reason. Prompt rules added:
+  a reason may only be stated if the quoted text gives it; concerns in review
+  comments are not decisions; end with "Not in the evidence:" when the reason
+  is not stated. (Found by a real run that cited a comment while reversing it.)
+- `--ask` reason check: a sentence that presents something as the reason is
+  kept only if its quote itself states a reason and contains no hedging or
+  question; a reason claim is never kept alongside "Not in the evidence". Curly
+  single-quote pairs are recognised as quotes. (Found by a real run that turned
+  a reviewer's warning into the decision.)
+- `--ask` fallback: when no factual sentence survives the checks, the answer
+  shows the most relevant comment as an exact quote with its link, then
+  "The evidence does not explain the final decision." Removed sentences are
+  now counted in normal output and listed only with `--show-removed` or in
+  JSON (`removed`, plus new `fallback`). Evidence items carry `quote`.
+- The fallback quote is the single most relevant exact sentence of that
+  comment (not the whole comment); the full text stays in JSON `fallback.full`.
+- `--ask` distinguishes **code-explanation** questions ("What does this line
+  do?") from **history** questions ("Why was this added?") and says which it
+  detected. Code questions get the source at HEAD as citable evidence —
+  `[S1]` the line, `[S2]` the enclosing block (≤ 40 lines) — ahead of the
+  commits, with a prompt that forbids historical claims from code; history
+  questions keep commits/PRs/comments first and gain `[S1]` last. New validator
+  rule: a sentence cited only to source code is removed if it makes a
+  historical claim. Backtick quotes and whole-line code quotes count as
+  verbatim quotes. JSON `ask` gains `mode`; the report schema is unchanged.
+  (Found by a real run where the only quotable evidence was a commit title.)
+- History answers must ground historical claims in `[C/P/I/R]` evidence: the
+  source-only history check now catches any past tense and time vocabulary
+  ("was already present", "has been here since", "still", "unchanged"); a
+  history answer with no history citation is `insufficient_evidence`, and
+  git-why appends its own "Not in the evidence" sentence when the model
+  omitted it (`added_by_git_why` in JSON). (Found by a real llama3.2 run that
+  answered "Why was this line added?" from `[S1]` alone.)
+
 ## [0.1.1] - 2026-10-30
 
 ### Fixed
 
 - JSON output now safely escapes Unicode characters, preventing
   Windows console encoding errors when using the --json option.
+- Function extent detection no longer mistakes a `{` inside an f-string or
+  dict literal on the first body line for the start of a brace block (affected
+  `--function` ranges and the new `--ask` code context).
 - `git why --help` now shows the description and an *Examples* section (the
   text passed to `typer.Typer(help=...)` is ignored for single-command apps),
   and the usage line reads `git-why` instead of `main`.
