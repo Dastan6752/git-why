@@ -55,7 +55,9 @@ SYSTEM_PROMPT = (
     "1. Every sentence that states a fact must (a) contain a short verbatim quote from the evidence in double "
     "quotes - at least three consecutive words copied exactly - and (b) end with the IDs of the evidence the quote "
     "comes from, in square brackets, e.g. [C2] or [C2][P1].\n"
-    "2. Use only IDs that appear in the evidence. Never cite anything else.\n"
+    "2. Use only IDs that appear in the evidence. Never cite anything else. [S1] is the current text of the line: "
+    "it can support what the line says now, never when, why or by whom it was added - those need [C..], [P..], "
+    "[I..] or [R..].\n"
     "3. A reason may be stated ONLY if the quoted text itself gives it as the reason. A concern, question or "
     "suggestion in a comment is not a decision: report it as what that person said, not as why the value was chosen. "
     "Never turn 'X would be a problem' into 'X was chosen to avoid the problem', and never write "
@@ -137,6 +139,7 @@ class Sentence:
     citations: list[str] = field(default_factory=list)
     claims_reason: bool = False  # the sentence presents something as *why* (allowed only if the quote states it)
     is_insufficient: bool = False  # a "Not in the evidence:" sentence
+    added_by_git_why: bool = False  # written by the validator, not by the model
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -144,6 +147,7 @@ class Sentence:
             "citations": list(self.citations),
             "claims_reason": self.claims_reason,
             "is_insufficient": self.is_insufficient,
+            "added_by_git_why": self.added_by_git_why,
         }
 
 
@@ -435,11 +439,17 @@ REASON_CONTRADICTED = 'states a reason while the answer also says "Not in the ev
 
 # Source code can show what a line does, never when, why or by whom it was written.
 _CLAIMS_HISTORY = re.compile(
-    r"\b(was|were|been|got|originally|later|previously|initially)\s+(\w+ly\s+)?"
-    r"(added|changed|introduced|removed|reverted|chosen|picked|set|renamed|moved|written|created|modified|updated|"
-    r"fixed|merged|replaced|tuned|rewritten)\b"
+    # any past tense ("was already present", "has been there", "got added", "used to be")
+    r"\b(was|were|had|has been|have been|had been|got|used to)\b"
+    # simple past of change verbs ("someone added", "it existed", "the value remained")
+    r"|\b(added|introduced|changed|removed|reverted|renamed|moved|created|modified|updated|fixed|merged|replaced|"
+    r"tuned|rewrote|rewritten|existed|remained|appeared|landed|became|started|began|chose|decided)\b"
+    # time vocabulary that only history can support
+    r"|\balready\b|\boriginally\b|\bpreviously\b|\binitially\b|\bformerly\b|\bearlier\b|\blater\b"
+    r"|\bsince\b|\bago\b|\balways\b|\bnever\b|\bstill\b|\bunchanged\b|\bremains\b|\bin (19|20)\d\d\b"
+    # sources the code cannot be
     r"|\bcommit(s|ted)?\b|\bpull request|\bPRs?\b|\breview(er|ers|ed)?\b|\bauthor(s|ed)?\b|\bhistor(y|ical)"
-    r"|\boriginally\b|\bin (19|20)\d\d\b|\bissue #?\d+|\bbug #?\d+|\bago\b",
+    r"|\bissue #?\d+|\bbug #?\d+|\bwritten by\b|\bwrote\b",
     re.I,
 )
 HISTORY_FROM_CODE = "historical claim cited to source code, not to a commit or discussion"
@@ -596,9 +606,11 @@ def ask(
 
     answer.raw = raw
     answer.sentences, answer.removed = validate(raw, pack)
-    has_fact = any(s.citations for s in answer.sentences)
-    answer.status = "answered" if has_fact else "insufficient_evidence"
-    if not has_fact:
+    answer.status = "answered" if has_facts(answer.sentences, pack, mode) else "insufficient_evidence"
+    if answer.status != "answered":
+        if mode == MODE_HISTORY and not any(s.is_insufficient for s in answer.sentences):
+            # the model neither grounded a historical claim nor admitted the gap: say it ourselves
+            answer.sentences.append(Sentence(NOT_IN_HISTORY, [], is_insufficient=True, added_by_git_why=True))
         answer.fallback = most_relevant_comment(pack, question, answer.removed, mode=mode)
         if not answer.sentences and not answer.fallback:
             answer.message = (
@@ -616,6 +628,22 @@ _STOPWORDS = frozenset(
 
 def _tokens(text: str) -> set[str]:
     return {t for t in _NORM.sub(" ", text.lower().replace("`", "")).split() if len(t) > 1 and t not in _STOPWORDS}
+
+
+NOT_IN_HISTORY = "Not in the evidence: the commits and discussions gathered do not say why this line was added."
+
+
+def has_facts(sentences: list[Sentence], pack: EvidencePack, mode: str) -> bool:
+    """
+    Did the answer establish anything? For code questions any cited sentence counts.
+    For history questions only a citation to history evidence (C/P/I/R) counts: the
+    current source [S1] can show what the line says, never when or why it got there.
+    """
+    for s in sentences:
+        kinds = {item.kind for c in s.citations if (item := pack.get(c)) is not None}
+        if kinds and (mode == MODE_CODE or kinds - {"code"}):
+            return True
+    return False
 
 
 def most_relevant_comment(

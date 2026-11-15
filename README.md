@@ -267,10 +267,17 @@ unchanged). The answer is written by a model running **on your machine** via
   said, but never as the reason the value was chosen — the sentence is removed
   with `states a reason, but the quoted source only raises a concern…`.
 - A sentence that cites **only source code** (`[S1]`/`[S2]`) may describe
-  behaviour, but any historical claim in it — *was added*, *reviewer*, *commit*,
-  *in 2014*, *issue #12* — is removed with `historical claim cited to source
-  code, not to a commit or discussion`. Code shows what a line does, never why
-  it was written.
+  behaviour in the present tense, but any historical claim in it — *was added*,
+  *was already present*, *has been here since*, *still*, *unchanged*, *reviewer*,
+  *commit*, *in 2014*, *issue #12* — is removed with `historical claim cited to
+  source code, not to a commit or discussion`. Code shows what a line does,
+  never when or why it got there.
+- A **history** answer counts as answered only if at least one kept sentence
+  cites a commit, PR, issue or review comment. If none does and the model did
+  not say so itself, git-why appends `Not in the evidence: the commits and
+  discussions gathered do not say why this line was added.` (marked
+  `added_by_git_why` in JSON) and the headline says the evidence does not
+  answer the question.
 - A reason claim and `Not in the evidence:` cannot both stand for the same
   question: if the model writes both, the reason claim is removed and the
   cautious sentence is kept. If the evidence does not state why the current

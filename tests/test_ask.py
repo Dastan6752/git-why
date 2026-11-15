@@ -533,7 +533,12 @@ def test_ask_everything_uncited(tmp_path: Path) -> None:
     fake = FakeOllama(models=["m"], reply="It is for performance. Trust me.")
     a = ask(sample_report(tmp_path), "why?", model="m", client=fake.client())
     assert a.status == "insufficient_evidence"
-    assert a.sentences == [] and [r.text for r in a.removed] == ["It is for performance.", "Trust me."]
+    assert [r.text for r in a.removed] == ["It is for performance.", "Trust me."]
+    # the model never admitted the gap, so git-why says it (and marks the sentence as its own)
+    assert [s.text for s in a.sentences] == [
+        "Not in the evidence: the commits and discussions gathered do not say why this line was added."
+    ]
+    assert a.sentences[0].added_by_git_why and a.sentences[0].is_insufficient
     # nothing factual survived: the best exact quote (here the only review comment) is offered instead
     assert a.fallback is not None and a.fallback.item.id == "R1" and a.message == ""
 
@@ -673,6 +678,7 @@ def test_json_render_includes_ask_block(tmp_path: Path) -> None:
         "citations": ["C1"],
         "claims_reason": False,
         "is_insufficient": False,
+        "added_by_git_why": False,
     }
     assert block["sources"][0]["id"] == "C1"
     assert block["removed"] == [{"text": "It is fast.", "reason": "no citation"}]
@@ -909,6 +915,150 @@ def test_e2e_history_question_keeps_the_current_behaviour(
     assert prompt.index("[C1]") < prompt.index("[C3]") < prompt.index("[S1]")  # history first, code last
     assert "[S2]" not in prompt  # no enclosing block for history questions
     assert _system_prompt(fake).startswith("You answer one question about a single line")
+
+
+def test_regression_history_answer_cited_only_to_source_code(
+    helper_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Observed with llama3.2 on Windows: "Why was this line added?" was classified as
+    history, but the answer cited only [S1] and claimed the line "was already present".
+    Source code cannot support a historical claim; the answer must end up as
+    "Not in the evidence" with the attempt listed under removed, and status must not be
+    "answered". (Sentence reconstructed from the report; the exact wording is covered
+    by the broader rule tests below.)
+    """
+    fake = FakeOllama(
+        models=["m"],
+        reply=('The line was already present in the source code: `print(f"error: {message}", file=sys.stderr)` [S1].'),
+    )
+    code, out, _ = _cli(
+        helper_repo,
+        "app.py:6",
+        "--ask",
+        "Why was this line added?",
+        "--model",
+        "m",
+        "--format",
+        "plain",
+        "--show-removed",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    assert code == 0
+    tail = out[out.index("Question: Why was this line added?") :]
+    lines = tail.splitlines()
+    assert lines[1] == "AI answer (model m): the gathered evidence does not answer this question"
+    assert lines[2] == "  question type: history"
+    assert lines[3] == "  Not in the evidence: the commits and discussions gathered do not say why this line was added."
+    assert "was already present" not in tail.split("Removed")[0]
+    assert "Removed 1 sentence the evidence does not support:" in tail
+    assert "reason: historical claim cited to source code, not to a commit or discussion" in tail
+    assert "Sources" not in tail  # nothing was established, so nothing is listed as a source
+    # the model saw commits first and was told what [S1] may support
+    prompt = _last_prompt(fake)
+    assert prompt.index("[C1]") < prompt.index("[S1]")
+    assert "[S1] is the current text of the line" in _system_prompt(fake)
+    # JSON: status and the synthesised sentence are explicit
+    code, out, _ = _cli(
+        helper_repo,
+        "app.py:6",
+        "--ask",
+        "Why was this line added?",
+        "--model",
+        "m",
+        "--json",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    block = json.loads(out)["ask"]
+    assert block["status"] == "insufficient_evidence" and block["mode"] == "history"
+    assert block["sentences"] == [
+        {
+            "text": "Not in the evidence: the commits and discussions gathered do not say why this line was added.",
+            "citations": [],
+            "claims_reason": False,
+            "is_insufficient": True,
+            "added_by_git_why": True,
+        }
+    ]
+    assert block["removed"][0]["reason"] == "historical claim cited to source code, not to a commit or discussion"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'The line was already present in the source code: `print(f"error: {message}", file=sys.stderr)` [S1].',
+        'This line has been here since the first version: `print(f"error: {message}", file=sys.stderr)` [S1].',
+        'Someone added `print(f"error: {message}", file=sys.stderr)` for consistency [S1].',
+        '`print(f"error: {message}", file=sys.stderr)` existed before the helper [S1].',
+        'The call to `print(f"error: {message}", file=sys.stderr)` is unchanged [S1].',
+        'It still calls `print(f"error: {message}", file=sys.stderr)` [S1].',
+        'The code used to be `print(f"error: {message}", file=sys.stderr)` [S1].',
+    ],
+)
+def test_source_only_history_claims_are_rejected_in_any_wording(helper_repo: Path, raw: str) -> None:
+    from git_why.ask import HISTORY_FROM_CODE
+
+    report = investigate(helper_repo / "app.py", 6, 6, Options())
+    for mode in ("history", "code"):  # [S1] exists in both modes
+        kept, removed = validate(raw, build(report, mode=mode))
+        assert kept == [] and removed[0].reason == HISTORY_FROM_CODE, (mode, raw)
+
+
+def test_history_mode_needs_a_history_citation_to_count_as_answered(
+    helper_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # a present-tense description of the line is allowed, but on its own it does not answer "why"
+    fake = FakeOllama(models=["m"], reply='The line reads `print(f"error: {message}", file=sys.stderr)` [S1].')
+    code, out, _ = _cli(
+        helper_repo,
+        "app.py:6",
+        "--ask",
+        "Why is this here?",
+        "--model",
+        "m",
+        "--json",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    block = json.loads(out)["ask"]
+    assert block["status"] == "insufficient_evidence"
+    assert [s["citations"] for s in block["sentences"]] == [["S1"], []]
+    assert block["sentences"][1]["added_by_git_why"] is True
+    # the same description with a real history fact is a full answer, and git-why adds nothing
+    fake = FakeOllama(
+        models=["m"],
+        reply=(
+            'The line reads `print(f"error: {message}", file=sys.stderr)` [S1]. '
+            'It was created in the commit "add fail helper" [C1]. Not in the evidence: why.'
+        ),
+    )
+    code, out, _ = _cli(
+        helper_repo,
+        "app.py:6",
+        "--ask",
+        "Why is this here?",
+        "--model",
+        "m",
+        "--json",
+        fake=fake,
+        monkeypatch=monkeypatch,
+    )
+    block = json.loads(out)["ask"]
+    assert block["status"] == "answered"
+    assert [s["added_by_git_why"] for s in block["sentences"]] == [False, False, False]
+
+
+def test_code_mode_behaviour_descriptions_with_after_or_called_are_kept(helper_repo: Path) -> None:
+    report = investigate(helper_repo / "app.py", 6, 6, Options())
+    pack = build(report, mode="code")
+    for raw in [
+        "After printing, `sys.exit(code)` is called [S2].",
+        'It calls `print(f"error: {message}", file=sys.stderr)`, which prints the message in red to stderr [S1].',
+    ]:
+        kept, removed = validate(raw, pack)
+        assert removed == [] and kept, raw
 
 
 @pytest.mark.parametrize(

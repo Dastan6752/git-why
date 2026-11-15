@@ -45,6 +45,13 @@ All notable changes to this project are documented here. The format follows
   historical claim. Backtick quotes and whole-line code quotes count as
   verbatim quotes. JSON `ask` gains `mode`; the report schema is unchanged.
   (Found by a real run where the only quotable evidence was a commit title.)
+- History answers must ground historical claims in `[C/P/I/R]` evidence: the
+  source-only history check now catches any past tense and time vocabulary
+  ("was already present", "has been here since", "still", "unchanged"); a
+  history answer with no history citation is `insufficient_evidence`, and
+  git-why appends its own "Not in the evidence" sentence when the model
+  omitted it (`added_by_git_why` in JSON). (Found by a real llama3.2 run that
+  answered "Why was this line added?" from `[S1]` alone.)
 
 ## [0.1.1] - 2026-10-30
 
